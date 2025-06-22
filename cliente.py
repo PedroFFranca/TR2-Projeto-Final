@@ -299,7 +299,7 @@ class Peer:
                     "uploader_username": uploader_username,
                     "bytes_transferred": len(received_data)
                     }
-                    # Envia o relatório para o tracker em modo "fire-and-forget"
+                    #Envia o relatório para o tracker em modo "fire-and-forget"
                     self.send_to_tracker(report)
                 else:
                     print(f"\nFalha de checksum no chunk #{chunk_to_download}. Tentando baixar novamente...")

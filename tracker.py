@@ -407,8 +407,8 @@ class TrackerP2P:
 
                     if uploader and isinstance(bytes_transf, int):
                         Usuario.atualizar_estatisticas_upload(uploader, bytes_transf)
-                        # Nenhuma resposta é necessária para o cliente
-                        continue
+                        resposta["aprovado"] = True
+                        resposta["texto"] = "Relatório de upload recebido. Obrigado!"
                 else:
                     resposta["texto"] = "Comando inválido."
 
