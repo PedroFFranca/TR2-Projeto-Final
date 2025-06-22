@@ -162,7 +162,7 @@ class Peer:
                 print(f"\n[Mensagem de {sender}]: {message}")
                 self._salvar_historico_chat(sender, f"[{time.strftime('%H:%M:%S')}] {sender}: {message}")
                 return 
-                
+            print(response)
             peer_conn.sendall(json.dumps(response).encode())
 
         except (json.JSONDecodeError, ConnectionResetError, BrokenPipeError, OSError):
@@ -230,11 +230,13 @@ class Peer:
         # Informa ao tracker que agora possui este arquivo
         file_hash = calcular_hash_sha256(open(filepath, 'rb').read())
         req = {"op": "adicionar", "nome_arquivo": filename, "conteudo": file_hash, "file_size": file_size}
+        print("Enviando informações do arquivo para o tracker...")
         response = self.send_to_tracker(req)
+        print("Tracker respondeu")
         if response:
             print(f"Tracker respondeu: {response.get('texto')}")
-    
-        # Adicione estes métodos dentro da classe Peer
+        else:
+            print("Erro ao comunicar com o tracker. Verifique sua conexão.")
 
     def _reassemble_file(self, filename, temp_dir, total_chunks, chunk_size):
         """Junta todos os chunks temporários em um único arquivo final."""
@@ -258,10 +260,13 @@ class Peer:
             if os.path.exists(output_path): os.remove(output_path)
             return None
 
-    def _download_worker(self, peer_addr, filename, file_metadata, chunk_to_download, temp_dir):
+    def _download_worker(self, peer_info, filename, file_metadata, chunk_to_download, temp_dir):
         """
         Função executada por uma thread para baixar um único chunk.
         """
+        peer_addr = tuple(peer_info['addr'])
+        uploader_username = peer_info['login']
+
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as download_sock:
                 download_sock.settimeout(10)
@@ -288,6 +293,14 @@ class Peer:
                 if chunk_hash_recebido == hash_esperado:
                     # Sinaliza sucesso colocando o chunk na fila de chunks baixados
                     self.downloaded_chunks_queue.put(chunk_to_download)
+
+                    report = {
+                    "op": "report_upload",
+                    "uploader_username": uploader_username,
+                    "bytes_transferred": len(received_data)
+                    }
+                    # Envia o relatório para o tracker em modo "fire-and-forget"
+                    self.send_to_tracker(report)
                 else:
                     print(f"\nFalha de checksum no chunk #{chunk_to_download}. Tentando baixar novamente...")
                     os.remove(chunk_path) # Remove o chunk corrompido
@@ -296,8 +309,65 @@ class Peer:
             pass
 
 
+    def _get_metadata_from_peers(self, filename, peer_list):
+        """Obtém os metadados detalhados (com hashes de chunks) de um dos peers."""
+        for peer_info in peer_list:
+            peer_addr = tuple(peer_info['addr'])
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(5)
+                    sock.connect(peer_addr)
+                    sock.send(json.dumps({"op": "ask_file_metadata", "filename": filename}).encode())
+                    response = json.loads(sock.recv(16384).decode())
+                    if response.get("status") == "ok":
+                        return response["metadata"]
+            except Exception:
+                continue
+        return None
+
+    def _map_chunk_availability(self, filename, peer_list):
+        """Cria um mapa de quais peers possuem quais chunks."""
+        chunk_availability = {}
+        print("\nMapeando chunks disponíveis nos peers...")
+        for peer_info in peer_list:
+            peer_addr = tuple(peer_info['addr'])
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(5)
+                    sock.connect(peer_addr)
+                    # Este comando hipotético 'ask_chunks' deveria ser implementado no handle_peer_request
+                    # Por simplicidade, vamos manter a lógica que todos têm tudo, mas esta é a forma correta.
+                    # sock.send(json.dumps({"op": "ask_chunks", "filename": filename}).encode())
+                    # Por agora, vamos simular que todos responderam ter todos os chunks.
+                    # num_chunks = self._get_metadata_from_peers(filename, [peer_info])['total_chunks']
+                    # chunks_do_peer = list(range(num_chunks))
+
+                    # Simplificação mantida, mas estrutura correta está acima.
+                    num_chunks = self.file_metadata_cache['total_chunks'] # Usando um cache
+                    chunks_do_peer = list(range(num_chunks))
+                    
+                    for chunk_idx in chunks_do_peer:
+                        if chunk_idx not in chunk_availability:
+                            chunk_availability[chunk_idx] = []
+                        chunk_availability[chunk_idx].append(peer_info)
+            except Exception:
+                continue
+        return chunk_availability
+
+    def _choose_best_peer(self, chunk_idx, chunk_availability, sorted_peer_list):
+        """Escolhe o melhor peer (mais alto na lista do tracker) que possui o chunk."""
+        peers_com_o_chunk = chunk_availability.get(chunk_idx, [])
+        # Converte a lista de dicionários para uma lista de tuplas para fácil comparação
+        addrs_com_o_chunk = [tuple(p['addr']) for p in peers_com_o_chunk]
+        
+        for peer_info in sorted_peer_list:
+            if tuple(peer_info['addr']) in addrs_com_o_chunk:
+                return peer_info # Retorna o dicionário completo do peer
+        return None
+
     def download_file(self, filename):
-        """Orquestra o download paralelo de um arquivo usando a estratégia Rarest First."""
+        """Orquestra o download paralelo usando a lógica robusta."""
+        # 1. Obter informações do Tracker
         print("1/5: Solicitando informações ao tracker...")
         tracker_response = self.send_to_tracker({"op": "get_peers", "nome_arquivo": filename})
         if not tracker_response or not tracker_response.get("aprovado") or not tracker_response.get("dados"):
@@ -305,112 +375,95 @@ class Peer:
             return
 
         file_info = tracker_response["dados"]
-        peer_list = [tuple(p) for p in file_info.get("peers", [])]
+        peer_list = file_info.get("peers", []) # Agora é uma lista de dicionários: [{'login': ..., 'addr': (...)}}]
         file_size = file_info.get("file_size")
         main_file_hash = file_info.get("file_hash")
 
-        if not peer_list or not file_size or not main_file_hash:
-            print("Nenhum peer possui este arquivo ou os metadados estão incompletos.")
-            return
+        if not peer_list: print("Nenhum peer possui este arquivo."); return
 
+        # 2. Obter metadados detalhados
         print("2/5: Obtendo metadados detalhados de um peer...")
-        file_metadata = None
-        for peer_addr in peer_list:
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                    sock.settimeout(5)
-                    sock.connect(peer_addr)
-                    sock.send(json.dumps({"op": "ask_file_metadata", "filename": filename}).encode())
-                    response = json.loads(sock.recv(16384).decode()) # Buffer grande para hashes
-                    if response.get("status") == "ok":
-                        file_metadata = response["metadata"]
-                        break
-            except Exception:
-                continue
-
-        if not file_metadata:
-            print("Erro: Não foi possível obter os metadados de nenhum peer.")
+        self.file_metadata_cache = self._get_metadata_from_peers(filename, peer_list)
+        if not self.file_metadata_cache:
+            print("Erro: Não foi possível obter os metadados de nenhum peer online.")
             return
 
-        total_chunks = file_metadata["total_chunks"]
-        needed_chunks = set(range(total_chunks))
+        # 3. Mapear disponibilidade de chunks
+        print("3/5: Mapeando disponibilidade de chunks...")
+        chunk_availability = self._map_chunk_availability(filename, peer_list)
 
-        print("3/5: Mapeando disponibilidade de chunks (Rarest First)...")
-        chunk_availability = {i: [] for i in range(total_chunks)}
-        # (Para um download real, você consultaria todos os peers. Aqui simplificamos usando a lista inicial)
-        for chunk_idx in range(total_chunks):
-            chunk_availability[chunk_idx].extend(peer_list) # Simplificação: todos os peers têm todos os chunks
+        # 4. Iniciar Download Paralelo
+        total_chunks = self.file_metadata_cache["total_chunks"]
+        owned_chunks = set()
+        self.chunks_in_progress = set()
+        self.progress_lock = threading.Lock()
+        self.downloaded_chunks_queue = Queue()
 
-        print("4/5: Iniciando download paralelo...")
+        print(f"\n4/5: Iniciando download paralelo de {total_chunks} chunks...")
         temp_dir = f"temp_{main_file_hash[:8]}"
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
         os.makedirs(temp_dir)
 
-
-        self.downloaded_chunks_queue = Queue()
         active_threads = []
-        MAX_CONCURRENT_DOWNLOADS = 8 # Número de downloads simultâneos
+        MAX_CONCURRENT_DOWNLOADS = 8
 
-        while len(needed_chunks) > 0:
-            # Processa chunks que terminaram
+        while len(owned_chunks) < total_chunks:
+            # Processa chunks que terminaram com sucesso
             while not self.downloaded_chunks_queue.empty():
-                finished_chunk = self.downloaded_chunks_queue.get()
-                if finished_chunk in needed_chunks:
-                    needed_chunks.remove(finished_chunk)
+                owned_chunks.add(self.downloaded_chunks_queue.get())
 
-            # Limpa threads que já terminaram
             active_threads = [t for t in active_threads if t.is_alive()]
 
-            # Inicia novos downloads se houver espaço
-            if len(active_threads) < MAX_CONCURRENT_DOWNLOADS and needed_chunks:
-                # Lógica Rarest First
-                rarity_list = sorted([(len(chunk_availability.get(c, [])), c) for c in needed_chunks])
+            # Loop para iniciar novos trabalhadores se houver espaço
+            while len(active_threads) < MAX_CONCURRENT_DOWNLOADS:
+                with self.progress_lock:
+                    chunks_to_consider = [c for c in range(total_chunks) if c not in owned_chunks and c not in self.chunks_in_progress]
+                
+                if not chunks_to_consider: break
 
-                # Pega o chunk mais raro disponível
-                if rarity_list and rarity_list[0][0] > 0:
-                    chunk_to_download = rarity_list[0][1]
+                rarity_list = sorted([(len(chunk_availability.get(c, [])), c) for c in chunks_to_consider])
+                if not rarity_list or rarity_list[0][0] == 0:
+                    break 
 
-                    # Remove da lista para não ser pego por outra thread
-                    needed_chunks.remove(chunk_to_download) 
+                chunk_to_download = rarity_list[0][1]
+                
+                peer_info_escolhido = self._choose_best_peer(chunk_to_download, chunk_availability, peer_list)
+                if not peer_info_escolhido:
+                    # Se não encontrar ninguém, remove este chunk da consideração por um tempo para não travar
+                    with self.progress_lock: self.chunks_in_progress.add(chunk_to_download)
+                    continue
 
-                    peer_addr = random.choice(chunk_availability[chunk_to_download])
+                with self.progress_lock:
+                    self.chunks_in_progress.add(chunk_to_download)
+                
+                thread = threading.Thread(target=self._download_worker, args=(peer_info_escolhido, filename, self.file_metadata_cache, chunk_to_download, temp_dir))
+                thread.daemon = True
+                thread.start()
+                active_threads.append(thread)
+            
+            print(f"\rProgresso: {len(owned_chunks)}/{total_chunks} chunks. Downloads ativos: {len(active_threads)}", end="")
+            if len(owned_chunks) == total_chunks: break
+            time.sleep(0.2)
 
-                    thread = threading.Thread(
-                        target=self._download_worker,
-                        args=(peer_addr, filename, file_metadata, chunk_to_download, temp_dir)
-                    )
-                    thread.daemon = True
-                    thread.start()
-                    active_threads.append(thread)
-
-            print(f"\rProgresso: {total_chunks - len(needed_chunks)}/{total_chunks} chunks. Downloads ativos: {len(active_threads)}", end="")
-            time.sleep(0.1)
-
+        # 5. Remontagem e Validação Final
         print("\n5/5: Download completo. Remontando e validando arquivo...")
-        final_path = self._reassemble_file(filename, temp_dir, total_chunks, file_metadata["chunk_size"])
-
+        final_path = self._reassemble_file(filename, temp_dir, total_chunks, self.file_metadata_cache["chunk_size"])
         if final_path:
             final_hash = calcular_hash_sha256(open(final_path, 'rb').read())
             if final_hash == main_file_hash:
-                print(f"Adicionando '{filename}' à sua lista de arquivos compartilhados...")
-                # Reutilizamos a função que já existe para adicionar o arquivo recém-baixado
-                # ao seu próprio banco de dados local e também para notificar o tracker.
+                print(f"\nSUCESSO! Arquivo '{filename}' validado com sucesso.")
                 self.adicionar_arquivo_para_compartilhar(final_path)
             else:
-                print("ERRO DE VALIDAÇÃO! O hash do arquivo final não corresponde ao original.")
-
+                print("\nERRO DE VALIDAÇÃO! O hash do arquivo final não corresponde ao original.")
+        
         shutil.rmtree(temp_dir)
 
     def send_to_tracker(self, request):
-        """Envia uma requisição para o tracker e retorna a resposta."""
-        try:
-            self.tracker_socket.send(json.dumps(request).encode())
-            response_bytes = self.tracker_socket.recv(4096)
-            if not response_bytes: return None
-            return json.loads(response_bytes.decode())
-        except (ConnectionResetError, BrokenPipeError, json.JSONDecodeError):
-            print("Conexão com o tracker foi perdida ou corrompida.")
+        self.tracker_socket.send(json.dumps(request).encode())
+        response_bytes = self.tracker_socket.recv(4096)
+        if not response_bytes:
             return None
+        return json.loads(response_bytes.decode())
 
     def main_loop(self):
         """Loop principal de interação com o usuário."""

@@ -298,32 +298,54 @@ class TrackerP2P:
 
                 elif comando == "get_peers":
                     nome_arquivo = dados.get("nome_arquivo")
-                    if current_user_login and nome_arquivo:
+                    if not (current_user_login and nome_arquivo):
+                        resposta["texto"] = "Requisição inválida."; client.send(json.dumps(resposta).encode()); continue
+
+                    # 1. Pega informações básicas do arquivo
+                    with FILE_LOCK:
                         with open("arquivos.json", "r") as f:
                             arquivos_data = json.load(f)
-                        
-                        if nome_arquivo in arquivos_data:
-                            info_arquivo_salvo = arquivos_data[nome_arquivo]
-                            peers_com_arquivo = info_arquivo_salvo["peers"]
-                            enderecos_ativos = []
-                            
-                            with self.peers_lock:
-                                for peer_login in peers_com_arquivo:
-                                    if peer_login in self.active_peers:
-                                        enderecos_ativos.append(self.active_peers[peer_login])
-                            
-                            # Monta o dicionário no formato que o peer espera
-                            dados_para_enviar = {
-                            "peers": enderecos_ativos,
-                            "file_size": info_arquivo_salvo.get("size"),
-                            "file_hash": info_arquivo_salvo.get("hash") # ESSA LINHA É CRUCIAL
-                        }
 
-                            resposta["aprovado"] = True
-                            resposta["texto"] = f"Encontrados {len(enderecos_ativos)} peers com o arquivo."
-                            resposta["dados"] = dados_para_enviar # Agora "dados" contém um DICIONÁRIO
-                        else:
-                            resposta["texto"] = "Arquivo não encontrado no tracker."
+                    info_arquivo_salvo = arquivos_data.get(nome_arquivo)
+                    if not info_arquivo_salvo:
+                        resposta["texto"] = "Arquivo não encontrado."; client.send(json.dumps(resposta).encode()); continue
+
+                    # 2. Monta uma lista de candidatos que estão REALMENTE online
+                    peers_com_arquivo = info_arquivo_salvo.get("peers", [])
+                    candidatos_online = []
+                    with self.peers_lock:
+                        for login in peers_com_arquivo:
+                            if login in self.active_peers:
+                                candidatos_online.append({"login": login, "addr": self.active_peers[login]})
+
+                    if not candidatos_online:
+                        resposta["texto"] = "Nenhum peer com este arquivo está online."; client.send(json.dumps(resposta).encode()); continue
+
+                    # 3. Calcula o score de cada candidato e os ordena
+                    peers_com_score = []
+                    with FILE_LOCK:
+                        with open("user.json", "r") as f:
+                            users_data = json.load(f)
+                    
+                    for candidato in candidatos_online:
+                        user_data = users_data.get(candidato["login"], {})
+                        score = Usuario.calcular_score_reputacao(user_data.get("reputacao"))
+                        peers_com_score.append({"login": candidato["login"], "addr": candidato["addr"], "score": score})
+                    
+                    peers_com_score.sort(key=lambda p: p["score"], reverse=True)
+                    
+                    # 4. Prepara a lista final ordenada (agora com login e endereço)
+                    lista_final_ordenada = [{"login": p["login"], "addr": p["addr"]} for p in peers_com_score]
+
+                    # (A lógica de limite dinâmico pode ser adicionada aqui, antes de enviar)
+                    
+                    # 5. Envia a resposta ordenada para o cliente
+                    dados_para_enviar = {
+                        "peers": lista_final_ordenada,
+                        "file_size": info_arquivo_salvo.get("size"),
+                        "file_hash": info_arquivo_salvo.get("hash")
+                    }
+                    resposta.update({"aprovado": True, "dados": dados_para_enviar, "texto": f"Encontrados {len(lista_final_ordenada)} peers. Lista ordenada por reputação."})
                 
 
                 elif comando == "listar":
@@ -390,7 +412,9 @@ class TrackerP2P:
                 else:
                     resposta["texto"] = "Comando inválido."
 
+                
                 client.send(json.dumps(resposta).encode())
+
 
         except (ConnectionResetError, json.JSONDecodeError, BrokenPipeError) as e:
             print(f"Conexão com {addr} perdida ou corrompida: {e}")
