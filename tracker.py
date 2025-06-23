@@ -471,8 +471,8 @@ class TrackerP2P:
                         if p2p_port:
                             peer_ip = addr[0]
                             current_user_login = usuario.login
-                            login_time = time.time()
                             print("chegamos até aqui")
+                            now = time.time()
                             with self.peers_lock:
                                 self.active_peers[current_user_login] = {
                                     'addr': (peer_ip, p2p_port),
@@ -711,6 +711,7 @@ class TrackerP2P:
                         resposta["aprovado"] = True 
                     
                 elif comando == "sair" or comando == "close":
+                    Usuario.atualizar_estatisticas_upload(uploader, bytes_transf)
                     resposta["texto"] = "Desconectando..."
                     resposta["aprovado"] = True
                     client.send(json.dumps(resposta).encode())
