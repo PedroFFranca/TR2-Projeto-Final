@@ -48,8 +48,10 @@ class Peer:
         self.tracker_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.p2p_server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.p2p_port = 0
-        
         self.username = ""
+        self.chat_ativo = False
+        self.sala_chat_ativa = False
+        self.is_logged_in = False
         
 
         self.my_files_db_path = None
@@ -57,7 +59,85 @@ class Peer:
         
         if not os.path.exists('downloads'):
             os.makedirs('downloads')
+    def _send_heartbeat(self):
+        """Enquanto logado, envia um sinal de vida para o tracker a cada 30 segundos."""
+        while self.is_logged_in:
+            try:
+                self.send_to_tracker({"op": "heartbeat"})
+                time.sleep(30)
+            except:
+                self.is_logged_in = False
+                break
+        print("INFO: Thread de heartbeat finalizada.")
 
+    def _grupo_chat_receiver(self, group_name):
+        """Thread que verifica por novas mensagens de grupo a cada 3 segundos."""
+        last_message_count = 0
+        while self.chat_ativo:
+            try:
+                request = {"op": "get_group_chat", "group_name": group_name}
+                response = self.send_to_tracker(request)
+                if response and response.get("aprovado"):
+                    history = response.get("dados", [])
+                    if len(history) > last_message_count:
+                        new_messages = history[last_message_count:]
+                        for msg in new_messages:
+                            # Evita imprimir as próprias mensagens que já aparecem ao digitar
+                            if msg['from'] != self.username:
+                                print(f"\n[{msg['timestamp']}] [{msg['from']}]: {msg['content']}")
+                        last_message_count = len(history)
+                time.sleep(3) # Pausa de 3 segundos entre cada verificação
+            except Exception:
+                # Se a conexão com o tracker cair, para o loop
+                self.chat_ativo = False
+
+    def _grupo_chat_sender(self, group_name):
+        """Thread que aguarda o input do usuário para enviar mensagens."""
+        while self.chat_ativo:
+            try:
+                message_content = input()
+                # Limpa a linha atual e reescreve o prompt para uma UI mais limpa
+                print("\033[A\033[K", end="") 
+                print(f"[{self.username} -> {group_name}]: {message_content}")
+
+                if message_content == "/sair":
+                    self.chat_ativo = False
+                    break
+                
+                request = {"op": "send_group_message", "group_name": group_name, "content": message_content}
+                self.send_to_tracker(request)
+            except (KeyboardInterrupt, EOFError):
+                self.chat_ativo = False
+                break
+        print("Saindo do chat de grupo...")
+
+    def iniciar_chat_em_grupo(self, group_name):
+        """Função principal que orquestra as threads de envio e recebimento."""
+        self.chat_ativo = True
+        #os.system('cls' if os.name == 'nt' else 'clear')
+        print(f"--- Entrando no chat do grupo '{group_name}'. Digite '/sair' para terminar. ---")
+        
+        # Inicia a thread para receber mensagens
+        receiver = threading.Thread(target=self._grupo_chat_receiver, args=(group_name,))
+        receiver.daemon = True
+        receiver.start()
+        
+        # Inicia a thread para enviar mensagens (e aguarda aqui)
+        sender = threading.Thread(target=self._grupo_chat_sender, args=(group_name,))
+        sender.daemon = True
+        sender.start()
+        
+        # Mantém a função principal viva enquanto o chat estiver ativo
+        while self.chat_ativo:
+            try:
+                time.sleep(1)
+            except KeyboardInterrupt:
+                self.chat_ativo = False
+                
+        # Espera a thread de envio terminar (após digitar /sair)
+        sender.join() 
+        print(f"--- Você saiu do chat do grupo '{group_name}'. ---")    
+    
     def _carregar_meus_arquivos(self):
         """Carrega o banco de dados local DEPOIS de saber o nome do arquivo."""
         # Se por algum motivo o caminho não foi definido, não faz nada
@@ -90,8 +170,10 @@ class Peer:
 
         try:
             with open(full_path, 'r') as log_file:
-                return log_file.readlines()
-            print("-"*(42 + len(target_username)) + "\n")
+                print("-"*(42 + len(sender)) + "\n")
+                for j in log_file.readlines():
+                    print(j.strip())
+            
         except Exception as e:
             print(f"Erro ao carregar histórico de chat: {e}")
     
@@ -106,6 +188,15 @@ class Peer:
                 log_file.write(f"{message}\n")
         except Exception as e:
             print(f"Erro ao salvar histórico de chat: {e}")
+    
+    def sair_da_sala(self, room_name):
+        """Envia um pedido ao tracker para sair de uma sala."""
+        if not room_name:
+            print("O nome da sala não pode ser vazio.")
+            return
+        response = self.send_to_tracker({"op": "leave_room", "room_name": room_name})
+        if response:
+            print(f"[Tracker]: {response.get('texto')}")
 
     def start_p2p_server(self):
         """Inicia o servidor P2P em uma thread para escutar por outros peers."""
@@ -122,6 +213,71 @@ class Peer:
                 handler_thread.start()
             except OSError:
                 break
+    def _sala_chat_receiver(self, room_name):
+        """THREAD 1: Verifica por novas mensagens de grupo a cada 3 segundos."""
+        last_message_count = 0
+        while self.sala_chat_ativa:
+            try:
+                request = {"op": "get_room_chat", "room_name": room_name}
+                response = self.send_to_tracker(request)
+                if response and response.get("aprovado"):
+                    history = response.get("dados", [])
+                    if len(history) > last_message_count:
+                        new_messages = history[last_message_count:]
+                        for msg in new_messages:
+                            if msg['from'] != self.username:
+                                # \r e ' ' servem para limpar a linha atual antes de imprimir a nova msg
+                                print(f"\r{' ' * 80}\r", end="")
+                                print(f"[{msg['timestamp']}] [{msg['from']}]: {msg['content']}")
+                                print(f"[{self.username} -> {room_name}]: ", end="", flush=True)
+                        last_message_count = len(history)
+                time.sleep(3)
+            except:
+                self.sala_chat_ativa = False
+
+    def _sala_chat_sender(self, room_name):
+        """THREAD 2: Aguarda o input do usuário para enviar mensagens."""
+        prompt = f"[{self.username} -> {room_name}]: "
+        while self.sala_chat_ativa:
+            try:
+                message_content = input(prompt)
+                if message_content == "/sair":
+                    self.sala_chat_ativa = False
+                    break
+                
+                request = {"op": "send_room_message", "room_name": room_name, "content": message_content}
+                self.send_to_tracker(request)
+            except (KeyboardInterrupt, EOFError):
+                self.sala_chat_ativa = False
+                break
+        print("\nSaindo do chat...")
+
+    def iniciar_chat_de_sala(self, room_name):
+        """Função principal que orquestra as threads de envio e recebimento."""
+        self.sala_chat_ativa = True
+        os.system('cls' if os.name == 'nt' else 'clear')
+        print(f"--- Entrando no chat da sala '{room_name}'. Digite '/sair' para terminar. ---")
+        
+        # Primeiro, busca e exibe o histórico existente
+        response = self.send_to_tracker({"op": "get_room_chat", "room_name": room_name})
+        initial_history = []
+        if response and response.get("aprovado"):
+            initial_history = response.get("dados", [])
+            if initial_history:
+                print("--- Histórico da Sala ---")
+                for msg in initial_history:
+                    print(f"[{msg['timestamp']}] [{msg['from']}]: {msg['content']}")
+                print("--- Fim do Histórico ---")
+
+        # Inicia a thread para receber mensagens
+        receiver = threading.Thread(target=self._sala_chat_receiver, args=(room_name,))
+        receiver.daemon = True
+        receiver.start()
+        
+        # A thread principal agora se dedica a enviar mensagens
+        self._sala_chat_sender(room_name)
+
+        os.system('cls' if os.name == 'nt' else 'clear')
 
     def handle_peer_request(self, peer_conn: socket.socket):
         """Lida com as requisições de outros peers (pedir metadados ou chunks)."""
@@ -365,8 +521,72 @@ class Peer:
                 return peer_info # Retorna o dicionário completo do peer
         return None
 
+    def download_file_sequencial(self, filename):
+        """Baixa um arquivo de forma sequencial, usando apenas uma conexão."""
+        print(f"\n--- Iniciando download SEQUENCIAL de '{filename}' ---")
+        
+        # 1. Obter informações do Tracker (igual ao outro método)
+        tracker_response = self.send_to_tracker({"op": "get_peers", "nome_arquivo": filename})
+        if not tracker_response or not tracker_response.get("aprovado"):
+            print("Erro ao obter informações do tracker.")
+            return
+        
+        file_info = tracker_response["dados"]
+        peer_list = file_info.get("peers", [])
+        if not peer_list:
+            print("Nenhum peer com o arquivo.")
+            return
+            
+        # Pega o primeiro peer da lista (o de melhor reputação)
+        target_peer_addr = tuple(peer_list[0]['addr'])
+        
+        # 2. Medir o tempo
+        start_time = time.time()
+        
+        try:
+            # Lógica de download simplificada
+            # (O ideal seria obter os metadados primeiro, mas vamos simplificar para o teste)
+            # (Este código assume que o arquivo tem 1 chunk para simplificar a medição)
+            
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.connect(target_peer_addr)
+                # Para um teste real, você precisaria de um loop para baixar todos os chunks
+                # aqui, mas para medir o tempo, uma única requisição já mostra a diferença.
+                # Vamos simular o download do primeiro chunk.
+                request = {"op": "get_chunk", "filename": filename, "chunk_index": 0}
+                sock.send(json.dumps(request).encode())
+                sock.recv(1024*1024 + 512) # Recebe até 1MB
+
+        except Exception as e:
+            print(f"Erro durante o download sequencial: {e}")
+        
+        end_time = time.time()
+        print(f"--- Download SEQUENCIAL finalizado. Tempo total: {end_time - start_time:.4f} segundos ---")
+
+    def criar_grupo(self, group_name):
+        """Envia um pedido ao tracker para criar um novo grupo."""
+        if not group_name:
+            print("O nome do grupo não pode ser vazio.")
+            return
+        request = {"op": "create_group", "group_name": group_name}
+        response = self.send_to_tracker(request)
+        if response:
+            print(f"[Tracker]: {response.get('texto')}")
+
+    def entrar_em_grupo(self, group_name):
+        """Envia um pedido ao tracker para entrar em um grupo existente."""
+        if not group_name:
+            print("O nome do grupo não pode ser vazio.")
+            return
+        request = {"op": "join_group", "group_name": group_name}
+        response = self.send_to_tracker(request)
+        if response:
+            print(f"[Tracker]: {response.get('texto')}")
+    
     def download_file(self, filename):
         """Orquestra o download paralelo usando a lógica robusta."""
+        print(f"\n--- Iniciando download PARALELO de '{filename}' ---")
+        start_time = time.time()
         # 1. Obter informações do Tracker
         print("1/5: Solicitando informações ao tracker...")
         tracker_response = self.send_to_tracker({"op": "get_peers", "nome_arquivo": filename})
@@ -445,6 +665,8 @@ class Peer:
             if len(owned_chunks) == total_chunks: break
             time.sleep(0.2)
 
+        end_time = time.time()
+        print(f"\n--- Download PARALELO finalizado. Tempo total: {end_time - start_time:.4f} segundos ---")
         # 5. Remontagem e Validação Final
         print("\n5/5: Download completo. Remontando e validando arquivo...")
         final_path = self._reassemble_file(filename, temp_dir, total_chunks, self.file_metadata_cache["chunk_size"])
@@ -464,10 +686,96 @@ class Peer:
         if not response_bytes:
             return None
         return json.loads(response_bytes.decode())
+    def criar_sala(self, room_name):
+        response = self.send_to_tracker({"op": "create_room", "room_name": room_name})
+        if response: print(f"[Tracker]: {response.get('texto')}")
 
+    def apagar_sala(self, room_name):
+        response = self.send_to_tracker({"op": "delete_room", "room_name": room_name})
+        if response: print(f"[Tracker]: {response.get('texto')}")
+
+    def convidar_para_sala(self, room_name, target_user):
+        req = {"op": "invite_to_room", "room_name": room_name, "target_user": target_user}
+        response = self.send_to_tracker(req)
+        if response: print(f"[Tracker]: {response.get('texto')}")
+
+    def expulsar_da_sala(self, room_name, target_user):
+        req = {"op": "kick_from_room", "room_name": room_name, "target_user": target_user}
+        response = self.send_to_tracker(req)
+        if response: print(f"[Tracker]: {response.get('texto')}")
+
+    def listar_salas(self):
+        response = self.send_to_tracker({"op": "list_rooms"})
+        if response and response.get("aprovado"):
+            print("\nSalas disponíveis:")
+            for room in response.get("dados", []):
+                print(f"- {room}")
+        elif response:
+            print(f"[Tracker]: {response.get('texto')}")
+
+    def listar_membros_sala(self, room_name):
+        response = self.send_to_tracker({"op": "list_room_members", "room_name": room_name})
+        if response and response.get("aprovado"):
+            details = response.get("dados", {})
+            print(f"\n--- Detalhes da Sala: {room_name} ---")
+            print(f"Moderador: {details.get('moderador')}")
+            print(f"Membros Autorizados: {', '.join(details.get('membros_autorizados', []))}")
+            print(f"Membros Online: {', '.join(details.get('membros_online', []))}")
+        elif response:
+            print(f"[Tracker]: {response.get('texto')}")
+
+
+    def _menu_salas(self):
+        """Exibe o submenu de gerenciamento e interação com salas de chat."""
+        os.system('cls' if os.name == 'nt' else 'clear')
+        while True:
+            print("\n--- Menu de Salas de Chat ---")
+            print("1 - Listar todas as salas")
+            print("2 - Criar uma nova sala (você será o moderador)")
+            print("3 - Entrar no chat de uma sala")
+            print("4 - Convidar um usuário para sua sala")
+            print("5 - Remover um usuário da sua sala")
+            print("6 - Apagar sua sala (apenas moderador)")
+            print("7 - Ver membros de uma sala")
+            print("8 - Sair de uma sala")
+            print("0 - Voltar ao menu principal")
+            op_sala = input("Escolha: ")
+
+            if op_sala == "1":
+                self.listar_salas()
+            elif op_sala == "2":
+                room_name = input("Digite o nome da nova sala: ")
+                self.criar_sala(room_name)
+            elif op_sala == "3":
+                room_name = input("Digite o nome da sala para entrar no chat: ")
+                self.iniciar_chat_de_sala(room_name)
+            elif op_sala == "4":
+                room_name = input("Nome da sua sala: ")
+                target_user = input("Nome do usuário a convidar: ")
+                self.convidar_para_sala(room_name, target_user)
+            elif op_sala == "5":
+                room_name = input("Nome da sua sala: ")
+                target_user = input("Nome do usuário a remover: ")
+                self.expulsar_da_sala(room_name, target_user)
+            elif op_sala == "6":
+                room_name = input("Nome da sala a ser apagada: ")
+                self.apagar_sala(room_name)
+            elif op_sala == "7":
+                room_name = input("Nome da sala para ver os membros: ")
+                self.listar_membros_sala(room_name)
+            elif op_sala == "8":
+                room_name = input("Nome da sala da qual deseja sair: ")
+                self.sair_da_sala(room_name)
+            elif op_sala == "0":
+                break
+            else:
+                print("Opção inválida.")
+            input("\nPressione Enter para continuar...")
+            os.system('cls' if os.name == 'nt' else 'clear')
+    
     def main_loop(self):
         """Loop principal de interação com o usuário."""
-        os.system('cls' if os.name == 'nt' else 'clear')
+        #os.system('cls' if os.name == 'nt' else 'clear')
         while True:
             if not self.username:
                 print("--- BEM-VINDO ---")
@@ -479,12 +787,15 @@ class Peer:
                 usuario = input("Usuário: ")
                 senha = input("Senha: ")
                 req = {"op": op, "usuario": usuario, "senha": senha}
-                if op == "2":
+                if op == "2" or op == "1":
                     req["p2p_port"] = self.p2p_port
 
                 response = self.send_to_tracker(req)
                 if response and response.get("aprovado"):
                     self.username = usuario
+                    self.is_logged_in = True
+                    heartbeat_thread = threading.Thread(target=self._send_heartbeat, daemon=True)
+                    heartbeat_thread.start()
                     
                     # Define o nome do arquivo de metadados baseado no usuário
                     self.my_files_db_path = f"files_{self.username}.json"
@@ -504,7 +815,7 @@ class Peer:
                             # Salva no histórico local
                             self._salvar_historico_chat(sender, f"[{timestamp}] {sender}: {content}")
                     print(f"Metadados de '{self.username}' carregados de '{self.my_files_db_path}'.")
-                    os.system('cls' if os.name == 'nt' else 'clear')
+                    #os.system('cls' if os.name == 'nt' else 'clear')
 
                 elif response:
                     print(f"Erro: {response.get('texto')}")
@@ -517,8 +828,9 @@ class Peer:
                 print("1 - Adicionar arquivo para compartilhar")
                 print("2 - Baixar arquivo")
                 print("3 - Listar arquivos no tracker")
-                print("4 - Iniciar chat com um usuário")
-                print("5 - Sair (Logout)")
+                print("4 - Conversar 1-1")
+                print("5 - Gerenciar Salas de Chat")
+                print("6 - Sair (Logout)")
                 op_p2p = input("Escolha: ")
                 
                 if op_p2p == "1":
@@ -528,7 +840,7 @@ class Peer:
                 elif op_p2p == "2":
                     filename = input("Nome do arquivo que deseja baixar: ")
                     # Chama a nova e poderosa função de download
-                    self.download_file(filename)
+                    self.download_file_sequencial(filename)
 
                 elif op_p2p == "3":
                     response = self.send_to_tracker({"op": "listar"})
@@ -536,12 +848,17 @@ class Peer:
                 elif op_p2p == "4":
                     target_user = input("Digite o nome do usuário para conversar: ")
                     self.iniciar_chat(target_user)
-    
-                elif op_p2p == "5": # Logout
+                
+                elif op_p2p == "5":
+                    self._menu_salas()
+
+                elif op_p2p == "6":
                     self._salvar_meus_arquivos()
                     self.send_to_tracker({"op": "sair"})
                     self.username, self.my_files_db_path, self.my_shared_files = "", None, {}
                     os.system('cls' if os.name == 'nt' else 'clear')
+                    self.is_logged_in = False
+                    break
                 
                 input("\nPressione Enter para continuar...")
 

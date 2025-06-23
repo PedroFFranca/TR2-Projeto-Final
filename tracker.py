@@ -135,7 +135,7 @@ class Arquivo:
     def adicionar_arquivo(cls, nome_arquivo, dados_do_peer, peer_login):
         with open("arquivos.json", "r+") as f:
             data = json.load(f)
-            file_hash = dados_do_peer.get("conteudo") # O "conteudo" enviado é o hash
+            file_hash = dados_do_peer.get("conteudo")
             file_size = dados_do_peer.get("file_size")
 
             if nome_arquivo in data:
@@ -179,6 +179,178 @@ class Arquivo:
                 resposta["aprovado"] = False
                 resposta["texto"] = "Arquivo não encontrado!"
                 return resposta
+
+# Em tracker.py
+
+class GerenciadorSalas:
+    """Gerencia a criação, exclusão e membros de salas de chat privadas."""
+    def __init__(self, rooms_file="salas.json", chats_file="salas_chats.json"):
+        self.rooms_file = rooms_file
+        self.chats_file = chats_file # Nova propriedade
+        self.lock = threading.Lock()
+        self._ensure_file_exists()
+
+    def _ensure_file_exists(self):
+        """Garante que o arquivo JSON de salas exista."""
+        with self.lock:
+            for f in [self.rooms_file, self.chats_file]:
+                if not os.path.exists(f):
+                    with open(f, 'w') as fp:
+                        json.dump({}, fp)
+
+    def create_room(self, room_name, moderator_login):
+        """Cria uma nova sala, definindo o requisitante como moderador."""
+        with self.lock:
+            with open(self.rooms_file, "r+") as f:
+                data = json.load(f)
+                if room_name in data:
+                    return False, "Sala com este nome já existe."
+                
+                data[room_name] = {
+                    "moderador": moderator_login,
+                    "membros_autorizados": [moderator_login] # Moderador já é membro
+                }
+                f.seek(0)
+                json.dump(data, f, indent=4)
+                f.truncate()
+                return True, f"Sala '{room_name}' criada com sucesso."
+
+    def delete_room(self, room_name, requester_login):
+        """Apaga uma sala, se o requisitante for o moderador."""
+        with self.lock:
+            with open(self.rooms_file, "r+") as f:
+                data = json.load(f)
+                if room_name not in data:
+                    return False, "Sala não encontrada."
+                if data[room_name]["moderador"] != requester_login:
+                    return False, "Apenas o moderador pode apagar a sala."
+                
+                del data[room_name] # Apaga a sala
+                
+                f.seek(0)
+                json.dump(data, f, indent=4)
+                f.truncate()
+                return True, f"Sala '{room_name}' apagada."
+
+    def invite_to_room(self, room_name, user_to_add, requester_login):
+        """Adiciona um usuário à lista de membros autorizados de uma sala."""
+        with self.lock:
+            with open(self.rooms_file, "r+") as f:
+                data = json.load(f)
+                if room_name not in data:
+                    return False, "Sala não encontrada."
+                if data[room_name]["moderador"] != requester_login:
+                    return False, "Apenas o moderador pode convidar usuários."
+                if user_to_add in data[room_name]["membros_autorizados"]:
+                    return False, f"Usuário '{user_to_add}' já está na sala."
+                
+                data[room_name]["membros_autorizados"].append(user_to_add)
+                f.seek(0)
+                json.dump(data, f, indent=4)
+                f.truncate()
+                return True, f"Usuário '{user_to_add}' convidado para a sala '{room_name}'."
+
+    def kick_from_room(self, room_name, user_to_kick, requester_login):
+        """Remove um usuário de uma sala."""
+        with self.lock:
+            with open(self.rooms_file, "r+") as f:
+                data = json.load(f)
+                if room_name not in data: return False, "Sala não encontrada."
+                if data[room_name]["moderador"] != requester_login: return False, "Apenas o moderador pode remover usuários."
+                if user_to_kick == requester_login: return False, "O moderador não pode se remover."
+                if user_to_kick not in data[room_name]["membros_autorizados"]: return False, "Usuário não está na sala."
+
+                data[room_name]["membros_autorizados"].remove(user_to_kick)
+                f.seek(0); json.dump(data, f, indent=4); f.truncate()
+                return True, f"Usuário '{user_to_kick}' removido da sala '{room_name}'."
+
+    def get_rooms(self):
+        """Retorna uma lista de todas as salas existentes."""
+        with self.lock:
+            with open(self.rooms_file, "r") as f:
+                data = json.load(f)
+                return list(data.keys())
+
+    def get_room_members(self, room_name):
+        """Retorna os detalhes de uma sala e seus membros."""
+        with self.lock:
+            with open(self.rooms_file, "r") as f:
+                data = json.load(f)
+                return data.get(room_name)
+    def store_room_message(self, room_name, message_data):
+        """Armazena uma nova mensagem no histórico do grupo e controla o tamanho do log."""
+        with self.lock:
+            # 1. Carrega as informações da sala para verificar permissões e limites
+            with open(self.rooms_file, "r") as f:
+                rooms_data = json.load(f)
+            
+            if room_name not in rooms_data:
+                return False, "Sala não existe."
+            
+            room_info = rooms_data[room_name]
+            if message_data["from"] not in room_info["membros_autorizados"]:
+                return False, "Você não é membro desta sala."
+
+            # 2. Armazena a mensagem no arquivo de chats
+            with open(self.chats_file, "r+") as f:
+                chats_data = json.load(f)
+                
+                # setdefault é uma forma elegante de criar a lista se ela não existir
+                message_history = chats_data.setdefault(room_name, [])
+                message_history.append(message_data)
+
+                # 3. Aplica o limite de histórico, se definido
+                max_history = room_info.get("historico_max_msgs", 200) # Padrão de 200 mensagens
+                if len(message_history) > max_history:
+                    # Mantém apenas as últimas 'max_history' mensagens
+                    chats_data[room_name] = message_history[-max_history:]
+
+                # 4. Salva os dados de volta no arquivo
+                f.seek(0)
+                json.dump(chats_data, f, indent=4)
+                f.truncate()
+            
+            return True, "Mensagem enviada ao grupo."
+    
+    def leave_room(self, room_name, user_login):
+        """Remove um usuário da lista de membros de uma sala."""
+        with self.lock:
+            with open(self.rooms_file, "r+") as f:
+                data = json.load(f)
+                if room_name not in data:
+                    return False, "Sala não encontrada."
+                
+                room = data[room_name]
+                if user_login not in room["membros_autorizados"]:
+                    return False, "Você não é membro desta sala."
+                
+                # Regra de negócio: O moderador não pode sair, apenas apagar a sala.
+                if user_login == room["moderador"]:
+                    return False, "O moderador não pode sair da sala. Use a opção de apagar."
+
+                # Remove o usuário da lista e salva
+                room["membros_autorizados"].remove(user_login)
+                f.seek(0)
+                json.dump(data, f, indent=4)
+                f.truncate()
+                return True, f"Você saiu da sala '{room_name}'."
+
+    def get_room_history(self, room_name, requester_login):
+        """Retorna o histórico de mensagens de uma sala para um membro autorizado."""
+        with self.lock:
+            with open(self.rooms_file, "r") as f:
+                rooms_data = json.load(f)
+            
+            # Verifica se a sala existe e se o solicitante é membro
+            if room_name not in rooms_data or requester_login not in rooms_data[room_name]["membros_autorizados"]:
+                return None, "Você não tem permissão para ver este chat."
+
+            with open(self.chats_file, "r") as f:
+                chats_data = json.load(f)
+            
+            # Retorna o histórico da sala (ou uma lista vazia se não houver mensagens)
+            return chats_data.get(room_name, []), "Histórico recuperado."
+
 
 class GerenciadorMensagens:
     """
@@ -240,7 +412,39 @@ class TrackerP2P:
         self.peers_lock = threading.Lock()
         self.clients = []
         self.message_manager = GerenciadorMensagens()
+        self.room_manager = GerenciadorSalas()
+        
 
+    def _reap_dead_peers(self):
+        """Periodicamente, remove peers que não enviam heartbeat."""
+        while True:
+            # Roda esta verificação a cada 60 segundos
+            time.sleep(60)
+            
+            now = time.time()
+            # Timeout: Se um peer não der sinal por mais de 70 segundos, é considerado inativo
+            # (dá uma margem de 10s sobre o heartbeat de 30s*2)
+            timeout = 70 
+            inactive_users = []
+
+            with self.peers_lock:
+                for username, data in self.active_peers.items():
+                    if now - data['last_seen'] > timeout:
+                        inactive_users.append(username)
+            
+            if inactive_users:
+                print(f"REAPER: Limpando {len(inactive_users)} peer(s) inativo(s): {', '.join(inactive_users)}")
+                print("Agora apenas o(s) peers estãoa tivos:", self.active_peers)
+                for username in inactive_users:
+                    # Reutiliza a lógica de desconexão que já está no 'finally' do handle_client
+                    # Aqui, precisamos garantir que o tempo online seja salvo
+                    with self.peers_lock:
+                        if username in self.active_peers:
+                            login_time = self.active_peers[username]['login_time']
+                            session_duration = time.time() - login_time
+                            Usuario.atualizar_tempo_online(username, session_duration)
+                            del self.active_peers[username]
+    
     def handle_client(self, client, addr):
         print(f"Nova conexão de {addr}")
         current_user_login = None
@@ -261,6 +465,21 @@ class TrackerP2P:
                     if usuario:
                         resposta["aprovado"] = True
                         resposta["texto"] = "Usuário registrado com sucesso!"
+                        usuario = Usuario.verificar_login(dados["usuario"], dados["senha"])
+                        p2p_port = dados.get("p2p_port")
+                        print(p2p_port)
+                        if p2p_port:
+                            peer_ip = addr[0]
+                            current_user_login = usuario.login
+                            login_time = time.time()
+                            print("chegamos até aqui")
+                            with self.peers_lock:
+                                self.active_peers[current_user_login] = {
+                                    'addr': (peer_ip, p2p_port),
+                                    'login_time': now,
+                                    'last_seen': now
+                                }
+                            print(f"Peer '{current_user_login}' registrou seu endereço: {peer_ip}:{p2p_port}")
                     else:
                         resposta["texto"] = "Erro: Login já existe ou dados inválidos."
 
@@ -272,8 +491,14 @@ class TrackerP2P:
                             peer_ip = addr[0]
                             current_user_login = usuario.login
                             login_time = time.time()
+
+                            now = time.time()
                             with self.peers_lock:
-                                self.active_peers[current_user_login] = (peer_ip, p2p_port)
+                                self.active_peers[current_user_login] = {
+                                    'addr': (peer_ip, p2p_port),
+                                    'login_time': now,
+                                    'last_seen': now
+                                }
 
                             resposta["aprovado"] = True
                             resposta["texto"] = f"Login realizado com sucesso! Bem-vindo, {current_user_login}."
@@ -287,7 +512,6 @@ class TrackerP2P:
                     # Certifica que o usuário está logado para adicionar um arquivo
                     if current_user_login:
                         # Passamos o dicionário 'dados' inteiro, que já contém
-                        # "conteudo" (o hash) e "file_size".
                         resposta = Arquivo.adicionar_arquivo(
                             nome_arquivo=dados.get("nome_arquivo"), 
                             dados_do_peer=dados,
@@ -301,7 +525,7 @@ class TrackerP2P:
                     if not (current_user_login and nome_arquivo):
                         resposta["texto"] = "Requisição inválida."; client.send(json.dumps(resposta).encode()); continue
 
-                    # 1. Pega informações básicas do arquivo
+
                     with FILE_LOCK:
                         with open("arquivos.json", "r") as f:
                             arquivos_data = json.load(f)
@@ -310,18 +534,21 @@ class TrackerP2P:
                     if not info_arquivo_salvo:
                         resposta["texto"] = "Arquivo não encontrado."; client.send(json.dumps(resposta).encode()); continue
 
-                    # 2. Monta uma lista de candidatos que estão REALMENTE online
+
                     peers_com_arquivo = info_arquivo_salvo.get("peers", [])
                     candidatos_online = []
                     with self.peers_lock:
                         for login in peers_com_arquivo:
                             if login in self.active_peers:
-                                candidatos_online.append({"login": login, "addr": self.active_peers[login]})
+                                candidatos_online.append({
+                                    "login": login,
+                                    "addr": self.active_peers[login]['addr']
+                                    })
 
                     if not candidatos_online:
                         resposta["texto"] = "Nenhum peer com este arquivo está online."; client.send(json.dumps(resposta).encode()); continue
 
-                    # 3. Calcula o score de cada candidato e os ordena
+
                     peers_com_score = []
                     with FILE_LOCK:
                         with open("user.json", "r") as f:
@@ -334,12 +561,23 @@ class TrackerP2P:
                     
                     peers_com_score.sort(key=lambda p: p["score"], reverse=True)
                     
-                    # 4. Prepara a lista final ordenada (agora com login e endereço)
+
                     lista_final_ordenada = [{"login": p["login"], "addr": p["addr"]} for p in peers_com_score]
 
-                    # (A lógica de limite dinâmico pode ser adicionada aqui, antes de enviar)
-                    
-                    # 5. Envia a resposta ordenada para o cliente
+
+                    downloader_data = users_data.get(current_user_login, {})
+                    downloader_score = Usuario.calcular_score_reputacao(downloader_data.get("reputacao", {}))            
+
+                    if downloader_score < 1000:
+                        limit = 15
+                    elif downloader_score < 10000:
+                        limit = 30
+                    else:
+                        limit = 50
+
+                    print(f"INFO: Score de '{current_user_login}' é {downloader_score:.2f}. Limite de peers: {limit}.")
+
+                    lista_final_ordenada = lista_final_ordenada[:limit]
                     dados_para_enviar = {
                         "peers": lista_final_ordenada,
                         "file_size": info_arquivo_salvo.get("size"),
@@ -349,7 +587,6 @@ class TrackerP2P:
                 
 
                 elif comando == "listar":
-                    # Este comando pode continuar como está ou ser aprimorado
                     with open("arquivos.json", "r") as f:
                         data = json.load(f)
                     resposta["texto"] = "Arquivos disponíveis:\n" + "\n".join(data.keys())
@@ -363,7 +600,7 @@ class TrackerP2P:
                             "content": dados.get("content"),
                             "timestamp": time.strftime('%H:%M:%S')
                         }
-                        # Chama o método do nosso gerenciador
+
                         self.message_manager.store_message(recipient, message_object)
                         resposta["aprovado"] = True
                         resposta["texto"] = "Mensagem offline armazenada para entrega posterior."
@@ -372,7 +609,6 @@ class TrackerP2P:
         
                 elif comando == "get_my_messages":
                     if current_user_login:
-                        # Chama o método do nosso gerenciador
                         messages = self.message_manager.retrieve_and_clear_messages(current_user_login)
                         resposta["aprovado"] = True
                         if messages:
@@ -382,8 +618,98 @@ class TrackerP2P:
                             resposta["texto"] = "Nenhuma mensagem offline."
                     else:
                         resposta["texto"] = "Erro: Ação permitida apenas para usuários logados."
+                 
 
+                elif comando == "create_room":
+                    if current_user_login:
+                        group_name = dados.get("room_name")
+                        success, message = self.room_manager.create_room(group_name, current_user_login)
+                        resposta.update({"aprovado": success, "texto": message})
+                    else:
+                        resposta["texto"] = "Ação permitida apenas para usuários logados."
                 
+                elif comando == "delete_room":
+                    if current_user_login:
+                        group_name = dados.get("room_name")
+                        success, message = self.room_manager.delete_room(group_name, current_user_login)
+                        resposta.update({"aprovado": success, "texto": message})
+                    else:
+                        resposta["texto"] = "Ação permitida apenas para usuários logados."
+
+                elif comando == "invite_to_room":
+                    if current_user_login:
+                        group_name = dados.get("room_name")
+                        user_to_add = dados.get("target_user")
+                        success, message = self.room_manager.invite_to_room(group_name, user_to_add, current_user_login)
+                        resposta.update({"aprovado": success, "texto": message})
+                    else:
+                        resposta["texto"] = "Ação permitida apenas para usuários logados."
+                
+                elif comando == "kick_from_room":
+                    if current_user_login:
+                        group_name = dados.get("room_name")
+                        user_to_kick = dados.get("target_user")
+                        success, message = self.room_manager.kick_from_room(group_name, user_to_kick, current_user_login)
+                        resposta.update({"aprovado": success, "texto": message})
+                    else:
+                        resposta["texto"] = "Ação permitida apenas para usuários logados."
+
+                elif comando == "list_rooms":
+                    room_list = self.room_manager.get_rooms()
+                    resposta.update({"aprovado": True, "dados": room_list, "texto": "Lista de salas disponíveis."})
+
+                elif comando == "list_room_members":
+                    group_name = dados.get("room_name")
+                    room_details = self.room_manager.get_room_members(group_name)
+                    if room_details:
+                        online_members = []
+                        with self.peers_lock:
+                            for member in room_details["membros_autorizados"]:
+                                if member in self.active_peers:
+                                    online_members.append(member)
+                        
+                        room_details["membros_online"] = online_members
+                        resposta.update({"aprovado": True, "dados": room_details})
+                    else:
+                        resposta["texto"] = "Sala não encontrada."
+                
+                elif comando == "send_room_message":
+                    if current_user_login:
+                        room_name = dados.get("room_name")
+                        message_obj = {
+                            "from": current_user_login,
+                            "content": dados.get("content"),
+                            "timestamp": time.strftime('%Y-%m-%d %H:%M:%S')
+                        }
+                        success, message = self.room_manager.store_room_message(room_name, message_obj)
+                        resposta.update({"aprovado": success, "texto": message})
+                    else:
+                        resposta["texto"] = "Ação permitida apenas para usuários logados."
+
+                elif comando == "get_room_chat":
+                    if current_user_login:
+                        room_name = dados.get("room_name")
+                        history, message = self.room_manager.get_room_history(room_name, current_user_login)
+                        if history is not None:
+                            resposta.update({"aprovado": True, "dados": history})
+                        resposta["texto"] = message
+                    else:
+                        resposta["texto"] = "Ação permitida apenas para usuários logados."
+                
+                elif comando == "leave_room":
+                    if current_user_login:
+                        room_name = dados.get("room_name")
+                        success, message = self.room_manager.leave_room(room_name, current_user_login)
+                        resposta.update({"aprovado": success, "texto": message})
+                    else:
+                        resposta["texto"] = "Ação permitida apenas para usuários logados."
+
+                elif comando == "heartbeat":
+                    if current_user_login and current_user_login in self.active_peers:
+                        with self.peers_lock:
+                            self.active_peers[current_user_login]['last_seen'] = time.time()
+                        resposta["aprovado"] = True 
+                    
                 elif comando == "sair" or comando == "close":
                     resposta["texto"] = "Desconectando..."
                     resposta["aprovado"] = True
@@ -438,6 +764,9 @@ class TrackerP2P:
             print(f"Conexão com {addr} encerrada. Conexões ativas: {len(self.clients)}")
 
     def iniciar(self):
+        reaper_thread = threading.Thread(target=self._reap_dead_peers, daemon=True)
+        reaper_thread.start()
+        print("INFO: Sistema de limpeza de peers (Reaper) iniciado.")
         try:
             while True:
                 client, addr = self.server.accept()
@@ -454,7 +783,6 @@ class TrackerP2P:
                 
 
 
-# Iniciando o servidor
 if __name__ == "__main__":
     tracker = TrackerP2P()
     print("Servidor aguardando conexões...")
