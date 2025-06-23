@@ -331,7 +331,7 @@ class Peer:
         is_online = response and response.get("aprovado")
         
 
-        os.system('cls' if os.name == 'nt' else 'clear') # Limpa a tela para o chat
+        #os.system('cls' if os.name == 'nt' else 'clear') # Limpa a tela para o chat
         self.carregar_mensagens_chat(target_username)
         
         print(f"\n--- Chat com {target_username} iniciado. Digite '/sair' para terminar. ---")
@@ -340,8 +340,10 @@ class Peer:
             if message_content == "/sair":
                 break
             if is_online:
+                print("Chegamos no is online")
                 try:
-                    target_addr = tuple(response.get("dados", {}).get("addr"))
+                    print(response.get("dados", {}).get("addr").get("addr"))
+                    target_addr = tuple(response.get("dados", {}).get("addr").get("addr"))
                     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as chat_sock:
                         chat_sock.connect(target_addr)
                         request = {"op": "chat_message", "from": self.username, "content": message_content}

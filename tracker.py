@@ -587,9 +587,26 @@ class TrackerP2P:
                 
 
                 elif comando == "listar":
+                    arquivos_encontrados = []
                     with open("arquivos.json", "r") as f:
                         data = json.load(f)
-                    resposta["texto"] = "Arquivos disponíveis:\n" + "\n".join(data.keys())
+                    print(data)
+                    for arquivo_info in data:
+                        print(arquivo_info)
+                        '''for peer in arquivo_info["peers"]:
+                            if peer in self.active_peers:
+
+                                nome_do_arquivo = arquivo_info["nome"] 
+                                arquivos_encontrados.append(nome_do_arquivo)
+
+                                break'''
+
+                    if arquivos_encontrados:
+
+                        lista_formatada = "\n" + "\n".join(sorted(list(arquivos_encontrados)))
+                        resposta["texto"] = "Arquivos disponíveis:" + lista_formatada
+                    else:
+                        resposta["texto"] = "Nenhum arquivo disponível nos peers ativos no momento."
                     resposta["aprovado"] = True
                     
                 elif comando == "send_offline_message":
@@ -733,7 +750,6 @@ class TrackerP2P:
                     bytes_transf = dados.get("bytes_transferred")
 
                     if uploader and isinstance(bytes_transf, int):
-                        Usuario.atualizar_estatisticas_upload(uploader, bytes_transf)
                         resposta["aprovado"] = True
                         resposta["texto"] = "Relatório de upload recebido. Obrigado!"
                 else:
