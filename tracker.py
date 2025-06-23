@@ -772,7 +772,7 @@ class TrackerP2P:
                 client, addr = self.server.accept()
                 self.clients.append(client)
                 thread = threading.Thread(target=self.handle_client, args=(client, addr))
-                thread.daemon = True # Permite que o programa principal saia mesmo com threads ativas
+                thread.daemon = True
                 thread.start()
         except KeyboardInterrupt:
             print("\nDesligando o servidor...")

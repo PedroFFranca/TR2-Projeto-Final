@@ -1,9 +1,7 @@
 '''
-é possivel madnar mensagem para uma conta q nao existe
+é possivel mandar mensagem para uma conta q nao existe
 
 '''
-
-
 import socket
 import json
 import os
@@ -59,6 +57,7 @@ class Peer:
         
         if not os.path.exists('downloads'):
             os.makedirs('downloads')
+    
     def _send_heartbeat(self):
         """Enquanto logado, envia um sinal de vida para o tracker a cada 30 segundos."""
         while self.is_logged_in:
@@ -312,6 +311,7 @@ class Peer:
                         # Envia o dado binário diretamente, sem JSON
                         peer_conn.sendall(chunk_data)
                         return
+                    
             elif op == "chat_message":
                 sender = request.get("from")
                 message = request.get("content")
@@ -402,8 +402,6 @@ class Peer:
             with open(output_path, "wb") as outfile:
                 for i in range(total_chunks):
                     
-                    ### ALTERAÇÃO AQUI ###
-                    # Imprime o progresso da remontagem usando a variável 'i'
                     print(f"\rRemontando chunk {i + 1}/{total_chunks}...", end="")
                     
                     chunk_path = os.path.join(temp_dir, f"chunk_{i}.tmp")
@@ -491,14 +489,6 @@ class Peer:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                     sock.settimeout(5)
                     sock.connect(peer_addr)
-                    # Este comando hipotético 'ask_chunks' deveria ser implementado no handle_peer_request
-                    # Por simplicidade, vamos manter a lógica que todos têm tudo, mas esta é a forma correta.
-                    # sock.send(json.dumps({"op": "ask_chunks", "filename": filename}).encode())
-                    # Por agora, vamos simular que todos responderam ter todos os chunks.
-                    # num_chunks = self._get_metadata_from_peers(filename, [peer_info])['total_chunks']
-                    # chunks_do_peer = list(range(num_chunks))
-
-                    # Simplificação mantida, mas estrutura correta está acima.
                     num_chunks = self.file_metadata_cache['total_chunks'] # Usando um cache
                     chunks_do_peer = list(range(num_chunks))
                     
@@ -518,50 +508,110 @@ class Peer:
         
         for peer_info in sorted_peer_list:
             if tuple(peer_info['addr']) in addrs_com_o_chunk:
-                return peer_info # Retorna o dicionário completo do peer
+                return peer_info 
         return None
 
     def download_file_sequencial(self, filename):
-        """Baixa um arquivo de forma sequencial, usando apenas uma conexão."""
+        """
+        Baixa um arquivo completo de forma sequencial, usando uma única fonte,
+        para fins de comparação de desempenho.
+        """
         print(f"\n--- Iniciando download SEQUENCIAL de '{filename}' ---")
         
-        # 1. Obter informações do Tracker (igual ao outro método)
+        # --- Etapa 1: Obter Informações do Tracker ---
+        print("1/4: Solicitando informações ao tracker...")
         tracker_response = self.send_to_tracker({"op": "get_peers", "nome_arquivo": filename})
-        if not tracker_response or not tracker_response.get("aprovado"):
-            print("Erro ao obter informações do tracker.")
+        if not tracker_response or not tracker_response.get("aprovado") or not tracker_response.get("dados"):
+            print(f"Erro: Não foi possível obter informações do arquivo '{filename}'.")
             return
         
         file_info = tracker_response["dados"]
         peer_list = file_info.get("peers", [])
+        main_file_hash = file_info.get("file_hash")
+
         if not peer_list:
             print("Nenhum peer com o arquivo.")
             return
-            
-        # Pega o primeiro peer da lista (o de melhor reputação)
-        target_peer_addr = tuple(peer_list[0]['addr'])
+
+        # Pega o primeiro peer da lista (o de melhor reputação) como nossa única fonte
+        target_peer_info = peer_list[0]
+        target_peer_addr = tuple(target_peer_info['addr'])
         
-        # 2. Medir o tempo
+        print(f"2/4: Obtendo metadados detalhados do peer {target_peer_addr}...")
+        file_metadata = self._get_metadata_from_peers(filename, [target_peer_info])
+        if not file_metadata:
+            print("Erro: Não foi possível obter os metadados do peer fonte.")
+            return
+
+        total_chunks = file_metadata["total_chunks"]
+        chunk_size = file_metadata["chunk_size"]
+        
+        temp_dir = f"temp_seq_{main_file_hash[:8]}"
+        if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
+        os.makedirs(temp_dir)
+
+        print(f"3/4: Iniciando download de {total_chunks} chunks de uma única fonte...")
         start_time = time.time()
         
         try:
-            # Lógica de download simplificada
-            # (O ideal seria obter os metadados primeiro, mas vamos simplificar para o teste)
-            # (Este código assume que o arquivo tem 1 chunk para simplificar a medição)
-            
+            # --- Etapa 3: Loop de Download Sequencial ---
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.connect(target_peer_addr)
-                # Para um teste real, você precisaria de um loop para baixar todos os chunks
-                # aqui, mas para medir o tempo, uma única requisição já mostra a diferença.
-                # Vamos simular o download do primeiro chunk.
-                request = {"op": "get_chunk", "filename": filename, "chunk_index": 0}
-                sock.send(json.dumps(request).encode())
-                sock.recv(1024*1024 + 512) # Recebe até 1MB
+                
+                for i in range(total_chunks):
+                    print(f"\rBaixando chunk {i + 1}/{total_chunks}...", end="")
+                    
+                    # Envia o pedido para o chunk 'i'
+                    request = {"op": "get_chunk", "filename": filename, "chunk_index": i}
+                    sock.sendall(json.dumps(request).encode())
 
+                    # Recebe o chunk
+                    received_data = b""
+                    bytes_to_receive = chunk_size
+                    if i == total_chunks - 1: # Lógica para o último chunk
+                        rem = file_metadata["file_size"] % chunk_size
+                        if rem > 0: 
+                            bytes_to_receive = rem
+                    
+                    while len(received_data) < bytes_to_receive:
+                        data = sock.recv(8192)
+                        if not data: break
+                        received_data += data
+                    
+                    # Valida o chunk recebido
+                    hash_recebido = calcular_hash_sha256(received_data)
+                    hash_esperado = file_metadata["chunk_hashes"][i]
+                    if hash_recebido != hash_esperado:
+                        print(f"\nErro de checksum no chunk #{i}! Abortando download.")
+                        shutil.rmtree(temp_dir)
+                        return
+
+                    # Salva o chunk no arquivo temporário
+                    chunk_path = os.path.join(temp_dir, f"chunk_{i}.tmp")
+                    with open(chunk_path, "wb") as f:
+                        f.write(received_data)
+                        
         except Exception as e:
-            print(f"Erro durante o download sequencial: {e}")
-        
+            print(f"\nErro durante o download sequencial: {e}")
+            shutil.rmtree(temp_dir)
+            return
+
         end_time = time.time()
-        print(f"--- Download SEQUENCIAL finalizado. Tempo total: {end_time - start_time:.4f} segundos ---")
+        print(f"\nDownload dos chunks finalizado. Tempo de transferência: {end_time - start_time:.4f} segundos.")
+        
+        # --- Etapa 4: Remontagem e Validação Final ---
+        print("4/4: Remontando e validando arquivo final...")
+        final_path = self._reassemble_file(filename, temp_dir, total_chunks, chunk_size)
+        
+        if final_path:
+            final_hash = calcular_hash_sha256(open(final_path, 'rb').read())
+            if final_hash == main_file_hash:
+                print(f"\nSUCESSO! Arquivo '{filename}' validado com sucesso.")
+                self.adicionar_arquivo_para_compartilhar(final_path)
+            else:
+                print("\nERRO DE VALIDAÇÃO! O hash do arquivo final não corresponde ao original.")
+            
+        shutil.rmtree(temp_dir)
 
     def criar_grupo(self, group_name):
         """Envia um pedido ao tracker para criar um novo grupo."""
@@ -797,10 +847,8 @@ class Peer:
                     heartbeat_thread = threading.Thread(target=self._send_heartbeat, daemon=True)
                     heartbeat_thread.start()
                     
-                    # Define o nome do arquivo de metadados baseado no usuário
                     self.my_files_db_path = f"files_{self.username}.json"
                     
-                    # Carrega os arquivos que este usuário já compartilhou
                     self.my_shared_files = self._carregar_meus_arquivos()
                     print("Verificando por mensagens offline...")
                     offline_msgs_response = self.send_to_tracker({"op": "get_my_messages"})
@@ -812,10 +860,9 @@ class Peer:
                             content = msg['content']
                             timestamp = msg['timestamp']
                             print(f"[{timestamp}] [Mensagem de {sender}]: {content}")
-                            # Salva no histórico local
                             self._salvar_historico_chat(sender, f"[{timestamp}] {sender}: {content}")
                     print(f"Metadados de '{self.username}' carregados de '{self.my_files_db_path}'.")
-                    #os.system('cls' if os.name == 'nt' else 'clear')
+                    os.system('cls' if os.name == 'nt' else 'clear')
 
                 elif response:
                     print(f"Erro: {response.get('texto')}")
@@ -839,7 +886,6 @@ class Peer:
                 
                 elif op_p2p == "2":
                     filename = input("Nome do arquivo que deseja baixar: ")
-                    # Chama a nova e poderosa função de download
                     self.download_file_sequencial(filename)
 
                 elif op_p2p == "3":
