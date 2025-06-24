@@ -267,6 +267,9 @@ class Peer:
                 for msg in initial_history:
                     print(f"[{msg['timestamp']}] [{msg['from']}]: {msg['content']}")
                 print("--- Fim do Histórico ---")
+        elif not response.get("aprovado"):
+            print(response.get("texto"))
+            return
 
         # Inicia a thread para receber mensagens
         receiver = threading.Thread(target=self._sala_chat_receiver, args=(room_name,))
@@ -283,7 +286,6 @@ class Peer:
         try:
             request_data = peer_conn.recv(1024).decode()
             request = json.loads(request_data)
-            print(request)
             
             op = request.get("op")
             response = {"status": "error", "message": "Invalid operation"}
@@ -293,7 +295,10 @@ class Peer:
                 if filename in self.my_shared_files:
                     response = {
                         "status": "ok",
-                        "metadata": self.my_shared_files[filename]
+                        "metadata":{
+                            "total_chunks": self.my_shared_files[filename].get("total_chunks"),
+                            "chunk_size": self.my_shared_files[filename].get("chunk_size")
+                        }
                     }
             
             elif op == "get_chunk":
@@ -312,13 +317,24 @@ class Peer:
                         peer_conn.sendall(chunk_data)
                         return
                     
+            elif op == "get_hash":
+                filename = request.get("filename")
+                chunk_index = request.get("chunk_index")
+                if filename in self.my_shared_files:
+                    response = {
+                        "status": "ok",
+                        "metadata":{
+                            "hash": self.my_shared_files[filename]["chunk_hashes"][chunk_index]
+                        }
+                    }
+
+            
             elif op == "chat_message":
                 sender = request.get("from")
                 message = request.get("content")
                 print(f"\n[Mensagem de {sender}]: {message}")
                 self._salvar_historico_chat(sender, f"[{time.strftime('%H:%M:%S')}] {sender}: {message}")
                 return 
-            print(response)
             peer_conn.sendall(json.dumps(response).encode())
 
         except (json.JSONDecodeError, ConnectionResetError, BrokenPipeError, OSError):
@@ -329,7 +345,9 @@ class Peer:
     def iniciar_chat(self, target_username):
         response = self.send_to_tracker({"op": "get_peer_addr", "username": target_username})
         is_online = response and response.get("aprovado")
-        
+        if not response.get("aprovado"):
+            print(response["texto"])
+            return
 
         #os.system('cls' if os.name == 'nt' else 'clear') # Limpa a tela para o chat
         self.carregar_mensagens_chat(target_username)
@@ -444,7 +462,10 @@ class Peer:
 
                 # Validação do chunk com checksum
                 chunk_hash_recebido = calcular_hash_sha256(received_data)
-                hash_esperado = file_metadata["chunk_hashes"][chunk_to_download]
+                request = {"op": "get_hash", "filename": filename, "chunk_index": chunk_to_download}
+                download_sock.send(json.dumps(request).encode())
+                response = json.loads(download_sock.recv(16384).decode())
+                hash_esperado = response["chunk_hashes"][chunk_to_download]
 
                 if chunk_hash_recebido == hash_esperado:
                     # Sinaliza sucesso colocando o chunk na fila de chunks baixados
@@ -474,10 +495,13 @@ class Peer:
                     sock.settimeout(5)
                     sock.connect(peer_addr)
                     sock.send(json.dumps({"op": "ask_file_metadata", "filename": filename}).encode())
+                    print("Requisicao feita")
                     response = json.loads(sock.recv(16384).decode())
+                    print("Resposta recebida")
                     if response.get("status") == "ok":
                         return response["metadata"]
             except Exception:
+                print("Esta rolando uma excessão")
                 continue
         return None
 
@@ -582,7 +606,9 @@ class Peer:
                             received_data += data
                         
                         hash_recebido = calcular_hash_sha256(received_data)
-                        hash_esperado = file_metadata["chunk_hashes"][i]
+                        sock.send(json.dumps(request).encode())
+                        response = json.loads(sock.recv(16384).decode())
+                        hash_esperado = response["chunk_hashes"][i]
                         if hash_recebido != hash_esperado:
                             print(f"\nErro de checksum no chunk #{i}! Abortando.")
                             raise Exception("Checksum Mismatch")
@@ -635,7 +661,7 @@ class Peer:
     
     def download_file(self, filename):
         """Orquestra o download paralelo usando a lógica robusta."""
-        print(f"\n--- Iniciando download PARALELO de '{filename}' ---")
+        print(f"\n--- Iniciando download PARALELO de '{filename}' com ---")
         start_time = time.time()
         # 1. Obter informações do Tracker
         print("1/5: Solicitando informações ao tracker...")
@@ -675,8 +701,8 @@ class Peer:
         os.makedirs(temp_dir)
 
         active_threads = []
-        MAX_CONCURRENT_DOWNLOADS = 8
-
+        MAX_CONCURRENT_DOWNLOADS = 4
+        print(f'Download paralelo utilizando {MAX_CONCURRENT_DOWNLOADS}')
         while len(owned_chunks) < total_chunks:
             # Processa chunks que terminaram com sucesso
             while not self.downloaded_chunks_queue.empty():
@@ -747,7 +773,8 @@ class Peer:
     def convidar_para_sala(self, room_name, target_user):
         req = {"op": "invite_to_room", "room_name": room_name, "target_user": target_user}
         response = self.send_to_tracker(req)
-        if response: print(f"[Tracker]: {response.get('texto')}")
+        if response: 
+            print(f"[Tracker]: {response.get('texto')}")
 
     def expulsar_da_sala(self, room_name, target_user):
         req = {"op": "kick_from_room", "room_name": room_name, "target_user": target_user}
@@ -887,11 +914,11 @@ class Peer:
                 elif op_p2p == "2":
                     filename = input("Nome do arquivo que deseja baixar: ")
                     self.download_file_sequencial(filename)
-                    #self.download_file(filename)
+                    self.download_file(filename)
 
                 elif op_p2p == "3":
                     response = self.send_to_tracker({"op": "listar"})
-                    if response: print(f"\nArquivos no Tracker:\n{response.get('texto')}")
+                    if response: print(f"\n{response.get('texto')}")
                 elif op_p2p == "4":
                     target_user = input("Digite o nome do usuário para conversar: ")
                     self.iniciar_chat(target_user)

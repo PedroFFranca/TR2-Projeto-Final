@@ -587,26 +587,27 @@ class TrackerP2P:
                 
 
                 elif comando == "listar":
-                    arquivos_encontrados = []
-                    with open("arquivos.json", "r") as f:
-                        data = json.load(f)
-                    print(data)
-                    for arquivo_info in data:
-                        print(arquivo_info)
-                        '''for peer in arquivo_info["peers"]:
-                            if peer in self.active_peers:
+                    arquivos_encontrados = set()
+                    
+                    with FILE_LOCK:
+                        with open("arquivos.json", "r") as f:
+                            data = json.load(f)
 
-                                nome_do_arquivo = arquivo_info["nome"] 
-                                arquivos_encontrados.append(nome_do_arquivo)
+                    with self.peers_lock:
+                        peers_ativos_logins = set(self.active_peers.keys())
 
-                                break'''
-
+                    for nome_do_arquivo, arquivo_info in data.items():
+                        peers_do_arquivo = set(arquivo_info.get("peers", []))
+                        
+                        if not peers_do_arquivo.isdisjoint(peers_ativos_logins):
+                            arquivos_encontrados.add(nome_do_arquivo)
+                    
                     if arquivos_encontrados:
-
                         lista_formatada = "\n" + "\n".join(sorted(list(arquivos_encontrados)))
-                        resposta["texto"] = "Arquivos disponíveis:" + lista_formatada
+                        resposta["texto"] = "Arquivos disponíveis (com peers online):" + lista_formatada
                     else:
-                        resposta["texto"] = "Nenhum arquivo disponível nos peers ativos no momento."
+                        resposta["texto"] = "Nenhum arquivo disponível com peers ativos no momento."
+                    
                     resposta["aprovado"] = True
                     
                 elif comando == "send_offline_message":
@@ -635,7 +636,6 @@ class TrackerP2P:
                             resposta["texto"] = "Nenhuma mensagem offline."
                     else:
                         resposta["texto"] = "Erro: Ação permitida apenas para usuários logados."
-                 
 
                 elif comando == "create_room":
                     if current_user_login:
@@ -657,8 +657,14 @@ class TrackerP2P:
                     if current_user_login:
                         group_name = dados.get("room_name")
                         user_to_add = dados.get("target_user")
-                        success, message = self.room_manager.invite_to_room(group_name, user_to_add, current_user_login)
-                        resposta.update({"aprovado": success, "texto": message})
+                        with open("user.json", "r") as f:
+                            data = json.load(f)
+                        if user_to_add in data:
+                            success, message = self.room_manager.invite_to_room(group_name, user_to_add, current_user_login)
+                            resposta.update({"aprovado": success, "texto": message})
+                        else:
+                            resposta["aprovado"] = False
+                            resposta["texto"] = "Esse usuário não existe"
                     else:
                         resposta["texto"] = "Ação permitida apenas para usuários logados."
                 
@@ -706,10 +712,17 @@ class TrackerP2P:
                 elif comando == "get_room_chat":
                     if current_user_login:
                         room_name = dados.get("room_name")
-                        history, message = self.room_manager.get_room_history(room_name, current_user_login)
-                        if history is not None:
-                            resposta.update({"aprovado": True, "dados": history})
-                        resposta["texto"] = message
+                        with open("salas.json", "r") as f:
+                            data = json.load(f)
+                        if room_name in data:
+                            history, message = self.room_manager.get_room_history(room_name, current_user_login)
+                            if history is not None:
+                                resposta.update({"aprovado": True, "dados": history})
+                            resposta["texto"] = message
+                        else:
+                            resposta["aprovado"] = False
+                            resposta["texto"] = message
+
                     else:
                         resposta["texto"] = "Ação permitida apenas para usuários logados."
                 
@@ -736,14 +749,21 @@ class TrackerP2P:
                 
                 elif comando == "get_peer_addr":
                     target_user = dados.get("username")
-                    with self.peers_lock:
-                        peer_data = self.active_peers.get(target_user)
-
-                    if peer_data:
-                        resposta["aprovado"] = True
-                        resposta["dados"] = {"addr": peer_data}
+                    with open("user.json", "r") as f:
+                        data = json.load(f)
+                    if target_user not in data:
+                        resposta["aprovado"] = False
+                        resposta["texto"] = f"Esse perfil que você digitou ({target_user}) não existe."
                     else:
-                        resposta["texto"] = f"Usuário '{target_user}' não está online."
+
+                        with self.peers_lock:
+                            peer_data = self.active_peers.get(target_user)
+
+                        if peer_data:
+                            resposta["aprovado"] = True
+                            resposta["dados"] = {"addr": peer_data}
+                        else:
+                            resposta["texto"] = f"Usuário '{target_user}' não está online."
                 
                 elif comando == "report_upload":
                     uploader = dados.get("uploader_username")
