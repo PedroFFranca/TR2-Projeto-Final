@@ -293,12 +293,10 @@ class Peer:
             if op == "ask_file_metadata":
                 filename = request.get("filename")
                 if filename in self.my_shared_files:
+
                     response = {
                         "status": "ok",
-                        "metadata":{
-                            "total_chunks": self.my_shared_files[filename].get("total_chunks"),
-                            "chunk_size": self.my_shared_files[filename].get("chunk_size")
-                        }
+                        "metadata": self.my_shared_files[filename]
                     }
             
             elif op == "get_chunk":
@@ -316,17 +314,6 @@ class Peer:
                         # Envia o dado binário diretamente, sem JSON
                         peer_conn.sendall(chunk_data)
                         return
-                    
-            elif op == "get_hash":
-                filename = request.get("filename")
-                chunk_index = request.get("chunk_index")
-                if filename in self.my_shared_files:
-                    response = {
-                        "status": "ok",
-                        "metadata":{
-                            "hash": self.my_shared_files[filename]["chunk_hashes"][chunk_index]
-                        }
-                    }
 
             
             elif op == "chat_message":
@@ -462,10 +449,7 @@ class Peer:
 
                 # Validação do chunk com checksum
                 chunk_hash_recebido = calcular_hash_sha256(received_data)
-                request = {"op": "get_hash", "filename": filename, "chunk_index": chunk_to_download}
-                download_sock.send(json.dumps(request).encode())
-                response = json.loads(download_sock.recv(16384).decode())
-                hash_esperado = response["chunk_hashes"][chunk_to_download]
+                hash_esperado = file_metadata["chunk_hashes"][chunk_to_download]
 
                 if chunk_hash_recebido == hash_esperado:
                     # Sinaliza sucesso colocando o chunk na fila de chunks baixados
@@ -495,13 +479,10 @@ class Peer:
                     sock.settimeout(5)
                     sock.connect(peer_addr)
                     sock.send(json.dumps({"op": "ask_file_metadata", "filename": filename}).encode())
-                    print("Requisicao feita")
                     response = json.loads(sock.recv(16384).decode())
-                    print("Resposta recebida")
                     if response.get("status") == "ok":
                         return response["metadata"]
             except Exception:
-                print("Esta rolando uma excessão")
                 continue
         return None
 
@@ -579,44 +560,51 @@ class Peer:
         print(f"3/4: Iniciando download de {total_chunks} chunks de uma única fonte...")
         start_time = time.time()
         
+
         try:
-            # --- Etapa 3: Loop de Download Sequencial ---
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.connect(target_peer_addr)
+            # --- Etapa 3: Loop de Download Sequencial Corrigido ---
+            for i in range(total_chunks):
+                print(f"\rBaixando chunk {i + 1}/{total_chunks}...", end="")
                 
-                for i in range(total_chunks):
-                    print(f"\rBaixando chunk {i + 1}/{total_chunks}...", end="")
+                # 1. Abre uma NOVA conexão para CADA chunk
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(10)
+                    sock.connect(target_peer_addr)
                     
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                        sock.settimeout(10)
-                        sock.connect(target_peer_addr)
-                        
-                        request = {"op": "get_chunk", "filename": filename, "chunk_index": i}
-                        sock.sendall(json.dumps(request).encode())
+                    # 2. Envia o pedido para o chunk 'i'
+                    request = {"op": "get_chunk", "filename": filename, "chunk_index": i}
+                    sock.sendall(json.dumps(request).encode())
 
-                        received_data = b""
-                        bytes_to_receive = chunk_size
-                        if i == total_chunks - 1:
-                            rem = file_metadata["file_size"] % chunk_size
-                            if rem > 0: bytes_to_receive = rem
-                        
-                        while len(received_data) < bytes_to_receive:
-                            data = sock.recv(8192)
-                            if not data: break
-                            received_data += data
-                        
-                        hash_recebido = calcular_hash_sha256(received_data)
-                        sock.send(json.dumps(request).encode())
-                        response = json.loads(sock.recv(16384).decode())
-                        hash_esperado = response["chunk_hashes"][i]
-                        if hash_recebido != hash_esperado:
-                            print(f"\nErro de checksum no chunk #{i}! Abortando.")
-                            raise Exception("Checksum Mismatch")
+                    # 3. Recebe os dados do chunk
+                    received_data = b""
+                    bytes_to_receive = chunk_size
+                    if i == total_chunks - 1:
+                        rem = file_metadata["file_size"] % chunk_size
+                        if rem > 0: bytes_to_receive = rem
+                    
+                    while len(received_data) < bytes_to_receive:
+                        data = sock.recv(8192)
+                        if not data: break
+                        received_data += data
+                
+                # --- Fora do 'with socket', a conexão já foi fechada ---
 
-                        chunk_path = os.path.join(temp_dir, f"chunk_{i}.tmp")
-                        with open(chunk_path, "wb") as f:
-                            f.write(received_data)
-                            
+                # 4. Valida o chunk que acabamos de receber
+                hash_recebido = calcular_hash_sha256(received_data)
+                # Pega o hash correto dos metadados que já tínhamos
+                print(file_metadata)
+                hash_esperado = file_metadata["chunk_hashes"][i] 
+                print(hash_esperado)
+                
+                if hash_recebido != hash_esperado:
+                    print(f"\nErro de checksum no chunk #{i}! Abortando download.")
+                    raise Exception("Checksum Mismatch")
+
+                # 5. Salva o chunk validado no arquivo temporário
+                chunk_path = os.path.join(temp_dir, f"chunk_{i}.tmp")
+                with open(chunk_path, "wb") as f:
+                    f.write(received_data)
+
         except Exception as e:
             print(f"\nErro durante o download sequencial: {e}")
             shutil.rmtree(temp_dir)
@@ -701,8 +689,8 @@ class Peer:
         os.makedirs(temp_dir)
 
         active_threads = []
-        MAX_CONCURRENT_DOWNLOADS = 4
-        print(f'Download paralelo utilizando {MAX_CONCURRENT_DOWNLOADS}')
+        MAX_CONCURRENT_DOWNLOADS = 8
+
         while len(owned_chunks) < total_chunks:
             # Processa chunks que terminaram com sucesso
             while not self.downloaded_chunks_queue.empty():
