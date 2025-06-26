@@ -656,7 +656,7 @@ class Peer:
         lendo-o em blocos para não sobrecarregar a memória.
         """
         hasher = hashlib.sha256()
-        tamanho_bloco = 8192 # Lê o arquivo em pedaços de 8KB
+        tamanho_bloco = 8192 
 
         try:
             with open(filepath, 'rb') as f:
@@ -675,32 +675,27 @@ class Peer:
         """Orquestra o download paralelo usando a lógica robusta."""
         print(f"\n--- Iniciando download PARALELO de '{filename}' ---")
         start_time = time.time()
-        # 1. Obter informações do Tracker
-        print("1/5: Solicitando informações ao tracker...")
         tracker_response = self.send_to_tracker({"op": "get_peers", "nome_arquivo": filename})
         if not tracker_response or not tracker_response.get("aprovado") or not tracker_response.get("dados"):
             print(f"Erro: Não foi possível obter informações do arquivo '{filename}'.")
             return
 
         file_info = tracker_response["dados"]
-        peer_list = file_info.get("peers", []) # Agora é uma lista de dicionários: [{'login': ..., 'addr': (...)}}]
-        file_size = file_info.get("file_size")
+        peer_list = file_info.get("peers", [])
         main_file_hash = file_info.get("file_hash")
 
-        if not peer_list: print("Nenhum peer possui este arquivo."); return
+        if not peer_list:
+            print("Nenhum peer possui este arquivo.")
+            return
 
-        # 2. Obter metadados detalhados
         print("2/5: Obtendo metadados detalhados de um peer...")
         self.file_metadata_cache = self._get_metadata_from_peers(filename, peer_list)
         if not self.file_metadata_cache:
             print("Erro: Não foi possível obter os metadados de nenhum peer online.")
             return
 
-        # 3. Mapear disponibilidade de chunks
         print("3/5: Mapeando disponibilidade de chunks...")
         chunk_availability = self._map_chunk_availability(filename, peer_list)
-
-        # 4. Iniciar Download Paralelo
         total_chunks = self.file_metadata_cache["total_chunks"]
         owned_chunks = set()
         self.chunks_in_progress = set()
@@ -713,49 +708,72 @@ class Peer:
         os.makedirs(temp_dir)
 
         active_threads = []
-        MAX_CONCURRENT_DOWNLOADS = 8
+        MAX_CONCURRENT_DOWNLOADS = 3  # Ajuste conforme desejado
+
+        # Novo: controle de peers ocupados
+        peers_busy = set()
+
+        def choose_free_peer(chunk_idx):
+            peers = chunk_availability.get(chunk_idx, [])
+            for peer in peers:
+                peer_id = tuple(peer['addr'])
+                if peer_id not in peers_busy:
+                    return peer, peer_id
+            return None, None
+
+        max_threads_used = 0
 
         while len(owned_chunks) < total_chunks:
-            # Processa chunks que terminaram com sucesso
             while not self.downloaded_chunks_queue.empty():
                 owned_chunks.add(self.downloaded_chunks_queue.get())
 
             active_threads = [t for t in active_threads if t.is_alive()]
 
-            # Loop para iniciar novos trabalhadores se houver espaço
+            if len(active_threads) > max_threads_used:
+                max_threads_used = len(active_threads)
+
             while len(active_threads) < MAX_CONCURRENT_DOWNLOADS:
                 with self.progress_lock:
                     chunks_to_consider = [c for c in range(total_chunks) if c not in owned_chunks and c not in self.chunks_in_progress]
-                
-                if not chunks_to_consider: break
+                if not chunks_to_consider:
+                    break
 
                 rarity_list = sorted([(len(chunk_availability.get(c, [])), c) for c in chunks_to_consider])
                 if not rarity_list or rarity_list[0][0] == 0:
-                    break 
+                    break
 
                 chunk_to_download = rarity_list[0][1]
-                
-                peer_info_escolhido = self._choose_best_peer(chunk_to_download, chunk_availability, peer_list)
+                peer_info_escolhido, peer_id = choose_free_peer(chunk_to_download)
                 if not peer_info_escolhido:
-                    # Se não encontrar ninguém, remove este chunk da consideração por um tempo para não travar
-                    with self.progress_lock: self.chunks_in_progress.add(chunk_to_download)
-                    continue
+                    break  # Não há peer livre agora, espere threads terminarem
 
                 with self.progress_lock:
                     self.chunks_in_progress.add(chunk_to_download)
-                
-                thread = threading.Thread(target=self._download_worker, args=(peer_info_escolhido, filename, self.file_metadata_cache, chunk_to_download, temp_dir))
+                    peers_busy.add(peer_id)
+
+                def worker_wrapper(peer_info, filename, file_metadata, chunk_to_download, temp_dir, peer_id):
+                    try:
+                        self._download_worker(peer_info, filename, file_metadata, chunk_to_download, temp_dir)
+                    finally:
+                        with self.progress_lock:
+                            peers_busy.discard(peer_id)
+
+                thread = threading.Thread(
+                    target=worker_wrapper,
+                    args=(peer_info_escolhido, filename, self.file_metadata_cache, chunk_to_download, temp_dir, peer_id)
+                )
                 thread.daemon = True
                 thread.start()
                 active_threads.append(thread)
-            
+
             print(f"\rProgresso: {len(owned_chunks)}/{total_chunks} chunks. Downloads ativos: {len(active_threads)}", end="")
-            if len(owned_chunks) == total_chunks: break
+            if len(owned_chunks) == total_chunks:
+                break
             time.sleep(0.2)
 
         end_time = time.time()
         print(f"\n--- Download PARALELO finalizado. Tempo total: {end_time - start_time:.4f} segundos ---")
-        # 5. Remontagem e Validação Final
+        print(f"Máximo de conexões paralelas utilizadas: {max_threads_used}")
         print("\n5/5: Download completo. Remontando e validando arquivo...")
         final_path = self._reassemble_file(filename, temp_dir, total_chunks, self.file_metadata_cache["chunk_size"])
         if final_path:
@@ -765,7 +783,6 @@ class Peer:
                 self.adicionar_arquivo_para_compartilhar(final_path)
             else:
                 print("\nERRO DE VALIDAÇÃO! O hash do arquivo final não corresponde ao original.")
-        
         shutil.rmtree(temp_dir)
     
  
@@ -939,6 +956,16 @@ class Peer:
                 
                 elif op_p2p == "5":
                     self._menu_salas()
+
+                elif op_p2p == "6":
+                    response = self.send_to_tracker({"op": "listar_peers"})
+                    if response and response.get("aprovado"):
+                        print("")
+                        print("Peers disponíveis:")
+                        for peer in response.get("texto", []):
+                            print(f"- {peer}")
+                    elif response:
+                        print(f"[Tracker]: {response.get('texto')}")
 
                 elif op_p2p == "7":
                     self._salvar_meus_arquivos()

@@ -742,11 +742,19 @@ class TrackerP2P:
                         resposta["aprovado"] = True 
                     
                 elif comando == "sair" or comando == "close":
-                    Usuario.atualizar_estatisticas_upload(uploader, bytes_transf)
                     resposta["texto"] = "Desconectando..."
                     resposta["aprovado"] = True
                     client.send(json.dumps(resposta).encode())
                     break
+                
+                elif comando == "listar_peers":
+                    with self.peers_lock:
+                        peers_list = list(self.active_peers.keys())
+                    if peers_list:
+                        resposta["aprovado"] = True
+                        resposta["texto"] = peers_list
+                    else:
+                        resposta["texto"] = "Nenhum peer ativo no momento."
                 
                 elif comando == "get_peer_addr":
                     target_user = dados.get("username")
