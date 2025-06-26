@@ -558,6 +558,7 @@ class TrackerP2P:
                         user_data = users_data.get(candidato["login"], {})
                         score = Usuario.calcular_score_reputacao(user_data.get("reputacao"))
                         peers_com_score.append({"login": candidato["login"], "addr": candidato["addr"], "score": score})
+                        print(user_data, score)
                     
                     peers_com_score.sort(key=lambda p: p["score"], reverse=True)
                     

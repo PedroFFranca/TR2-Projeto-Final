@@ -468,6 +468,8 @@ class Peer:
         except Exception as e:
             # A falha será tratada pelo loop principal, que tentará baixar o chunk novamente
             pass
+    
+
 
 
     def _get_metadata_from_peers(self, filename, peer_list):
@@ -542,6 +544,7 @@ class Peer:
 
         # Pega o primeiro peer da lista (o de melhor reputação) como nossa única fonte
         target_peer_info = peer_list[0]
+        print(f'Estamos baixando de {target_peer_info}')
         target_peer_addr = tuple(target_peer_info['addr'])
         
         print(f"2/4: Obtendo metadados detalhados do peer {target_peer_addr}...")
@@ -647,9 +650,30 @@ class Peer:
         if response:
             print(f"[Tracker]: {response.get('texto')}")
     
+    def calcular_hash_arquivo_inteiro(filepath):
+        """
+        Calcula o hash SHA-256 de um arquivo grande de forma eficiente,
+        lendo-o em blocos para não sobrecarregar a memória.
+        """
+        hasher = hashlib.sha256()
+        tamanho_bloco = 8192 # Lê o arquivo em pedaços de 8KB
+
+        try:
+            with open(filepath, 'rb') as f:
+                # O loop continua enquanto f.read(tamanho_bloco) retornar dados
+                while chunk := f.read(tamanho_bloco):
+                    hasher.update(chunk)
+            return hasher.hexdigest()
+        except FileNotFoundError:
+            print(f"ERRO: Arquivo não encontrado em '{filepath}' ao tentar calcular o hash.")
+            return None
+        except Exception as e:
+            print(f"ERRO: Ocorreu um erro ao ler o arquivo para hashing: {e}")
+            return None
+
     def download_file(self, filename):
         """Orquestra o download paralelo usando a lógica robusta."""
-        print(f"\n--- Iniciando download PARALELO de '{filename}' com ---")
+        print(f"\n--- Iniciando download PARALELO de '{filename}' ---")
         start_time = time.time()
         # 1. Obter informações do Tracker
         print("1/5: Solicitando informações ao tracker...")
@@ -743,7 +767,8 @@ class Peer:
                 print("\nERRO DE VALIDAÇÃO! O hash do arquivo final não corresponde ao original.")
         
         shutil.rmtree(temp_dir)
-
+    
+ 
     def send_to_tracker(self, request):
         self.tracker_socket.send(json.dumps(request).encode())
         response_bytes = self.tracker_socket.recv(4096)
@@ -892,7 +917,8 @@ class Peer:
                 print("3 - Listar arquivos no tracker")
                 print("4 - Conversar 1-1")
                 print("5 - Gerenciar Salas de Chat")
-                print("6 - Sair (Logout)")
+                print("6 - listar peer")
+                print("7 - Sair (Logout)")
                 op_p2p = input("Escolha: ")
                 
                 if op_p2p == "1":
@@ -914,7 +940,7 @@ class Peer:
                 elif op_p2p == "5":
                     self._menu_salas()
 
-                elif op_p2p == "6":
+                elif op_p2p == "7":
                     self._salvar_meus_arquivos()
                     self.send_to_tracker({"op": "sair"})
                     self.username, self.my_files_db_path, self.my_shared_files = "", None, {}
