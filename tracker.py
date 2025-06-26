@@ -1,5 +1,3 @@
-#Para parar o tracker, use o comando: kill -9 $(lsof -t -i:5000)
-#ou então ao na area de login/register escreva close na escolha:
 import socket
 import json
 import hashlib
@@ -467,11 +465,9 @@ class TrackerP2P:
                         resposta["texto"] = "Usuário registrado com sucesso!"
                         usuario = Usuario.verificar_login(dados["usuario"], dados["senha"])
                         p2p_port = dados.get("p2p_port")
-                        print(p2p_port)
                         if p2p_port:
                             peer_ip = addr[0]
                             current_user_login = usuario.login
-                            print("chegamos até aqui")
                             now = time.time()
                             with self.peers_lock:
                                 self.active_peers[current_user_login] = {
@@ -558,7 +554,7 @@ class TrackerP2P:
                         user_data = users_data.get(candidato["login"], {})
                         score = Usuario.calcular_score_reputacao(user_data.get("reputacao"))
                         peers_com_score.append({"login": candidato["login"], "addr": candidato["addr"], "score": score})
-                        print(user_data, score)
+                        print(f"INFO: Peer '{candidato['login']}' tem score de reputação {score:.2f}.")
                     
                     peers_com_score.sort(key=lambda p: p["score"], reverse=True)
                     

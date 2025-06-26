@@ -332,8 +332,8 @@ class Peer:
     def iniciar_chat(self, target_username):
         response = self.send_to_tracker({"op": "get_peer_addr", "username": target_username})
         is_online = response and response.get("aprovado")
-        if not response.get("aprovado"):
-            print(response["texto"])
+        if not response.get("aprovado") and response.get("texto") != f"Usuário '{target_username}' não está online.":
+            print(response.get("texto"))
             return
 
         #os.system('cls' if os.name == 'nt' else 'clear') # Limpa a tela para o chat
@@ -347,7 +347,6 @@ class Peer:
             if is_online:
                 print("Chegamos no is online")
                 try:
-                    print(response.get("dados", {}).get("addr").get("addr"))
                     target_addr = tuple(response.get("dados", {}).get("addr").get("addr"))
                     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as chat_sock:
                         chat_sock.connect(target_addr)
@@ -595,9 +594,7 @@ class Peer:
                 # 4. Valida o chunk que acabamos de receber
                 hash_recebido = calcular_hash_sha256(received_data)
                 # Pega o hash correto dos metadados que já tínhamos
-                print(file_metadata)
                 hash_esperado = file_metadata["chunk_hashes"][i] 
-                print(hash_esperado)
                 
                 if hash_recebido != hash_esperado:
                     print(f"\nErro de checksum no chunk #{i}! Abortando download.")
@@ -708,9 +705,8 @@ class Peer:
         os.makedirs(temp_dir)
 
         active_threads = []
-        MAX_CONCURRENT_DOWNLOADS = 3  # Ajuste conforme desejado
+        MAX_CONCURRENT_DOWNLOADS = 3 
 
-        # Novo: controle de peers ocupados
         peers_busy = set()
 
         def choose_free_peer(chunk_idx):
