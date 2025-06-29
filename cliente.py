@@ -420,7 +420,7 @@ class Peer:
             if os.path.exists(output_path): os.remove(output_path)
             return None
 
-    def _download_worker(self, peer_info, filename, file_metadata, chunk_to_download, temp_dir):
+    def _download_worker(self, peer_info, filename, file_metadata, chunk_to_download, temp_dir, tempo_de_pausa):
         """
         Função executada por uma thread para baixar um único chunk.
         """
@@ -428,6 +428,7 @@ class Peer:
         uploader_username = peer_info['login']
 
         try:
+            time.sleep(tempo_de_pausa)
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as download_sock:
                 download_sock.settimeout(10)
                 download_sock.connect(peer_addr)
@@ -457,7 +458,7 @@ class Peer:
                     report = {
                     "op": "report_upload",
                     "uploader_username": uploader_username,
-                    "bytes_transferred": len(received_data)
+                    "bytes_transferred": len(received_data),
                     }
                     #Envia o relatório para o tracker em modo "fire-and-forget"
                     self.send_to_tracker(report)
@@ -468,8 +469,6 @@ class Peer:
             # A falha será tratada pelo loop principal, que tentará baixar o chunk novamente
             pass
     
-
-
 
     def _get_metadata_from_peers(self, filename, peer_list):
         """Obtém os metadados detalhados (com hashes de chunks) de um dos peers."""
@@ -508,17 +507,7 @@ class Peer:
                 continue
         return chunk_availability
 
-    def _choose_best_peer(self, chunk_idx, chunk_availability, sorted_peer_list):
-        """Escolhe o melhor peer (mais alto na lista do tracker) que possui o chunk."""
-        peers_com_o_chunk = chunk_availability.get(chunk_idx, [])
-        # Converte a lista de dicionários para uma lista de tuplas para fácil comparação
-        addrs_com_o_chunk = [tuple(p['addr']) for p in peers_com_o_chunk]
-        
-        for peer_info in sorted_peer_list:
-            if tuple(peer_info['addr']) in addrs_com_o_chunk:
-                return peer_info 
-        return None
-
+    ''''
     def download_file_sequencial(self, filename):
         """
         Baixa um arquivo completo de forma sequencial, usando uma única fonte,
@@ -625,8 +614,7 @@ class Peer:
             else:
                 print("\nERRO DE VALIDAÇÃO! O hash do arquivo final não corresponde ao original.")
             
-        shutil.rmtree(temp_dir)
-
+        shutil.rmtree(temp_dir)'''
     def criar_grupo(self, group_name):
         """Envia um pedido ao tracker para criar um novo grupo."""
         if not group_name:
@@ -678,9 +666,10 @@ class Peer:
             return
 
         file_info = tracker_response["dados"]
+        tempo_de_pausa = file_info.get("download_limit")  # Tempo de pausa entre downloads de chunks
         peer_list = file_info.get("peers", [])
         main_file_hash = file_info.get("file_hash")
-
+        print(f'Tempo de pause é {tempo_de_pausa}')
         if not peer_list:
             print("Nenhum peer possui este arquivo.")
             return
@@ -705,7 +694,7 @@ class Peer:
         os.makedirs(temp_dir)
 
         active_threads = []
-        MAX_CONCURRENT_DOWNLOADS = 3 
+        MAX_CONCURRENT_DOWNLOADS = 3
 
         peers_busy = set()
 
@@ -749,7 +738,7 @@ class Peer:
 
                 def worker_wrapper(peer_info, filename, file_metadata, chunk_to_download, temp_dir, peer_id):
                     try:
-                        self._download_worker(peer_info, filename, file_metadata, chunk_to_download, temp_dir)
+                        self._download_worker(peer_info, filename, file_metadata, chunk_to_download, temp_dir,tempo_de_pausa)
                     finally:
                         with self.progress_lock:
                             peers_busy.discard(peer_id)
@@ -940,7 +929,7 @@ class Peer:
                 
                 elif op_p2p == "2":
                     filename = input("Nome do arquivo que deseja baixar: ")
-                    self.download_file_sequencial(filename)
+                    #self.download_file_sequencial(filename)
                     self.download_file(filename)
 
                 elif op_p2p == "3":

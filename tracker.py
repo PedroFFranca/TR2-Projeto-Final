@@ -566,19 +566,20 @@ class TrackerP2P:
                     downloader_score = Usuario.calcular_score_reputacao(downloader_data.get("reputacao", {}))            
 
                     if downloader_score < 1000:
-                        limit = 15
+                        limit = [5, 0.75]
                     elif downloader_score < 10000:
-                        limit = 30
+                        limit = [7, 0.5]
                     else:
-                        limit = 50
+                        limit = [10, 0]
 
-                    print(f"INFO: Score de '{current_user_login}' é {downloader_score:.2f}. Limite de peers: {limit}.")
-
-                    lista_final_ordenada = lista_final_ordenada[:limit]
+                    print(f"INFO: Score de '{current_user_login}' é {downloader_score:.2f}. Limite de peers: {limit[0]}.")
+                    print(F'Tempo de pausa é {limit[1]} segundos entre downloads.')
+                    lista_final_ordenada = lista_final_ordenada[:limit[0]]
                     dados_para_enviar = {
                         "peers": lista_final_ordenada,
                         "file_size": info_arquivo_salvo.get("size"),
-                        "file_hash": info_arquivo_salvo.get("hash")
+                        "file_hash": info_arquivo_salvo.get("hash"),
+                        "download_limit": limit[1]
                     }
                     resposta.update({"aprovado": True, "dados": dados_para_enviar, "texto": f"Encontrados {len(lista_final_ordenada)} peers. Lista ordenada por reputação."})
                 
@@ -773,7 +774,7 @@ class TrackerP2P:
                 elif comando == "report_upload":
                     uploader = dados.get("uploader_username")
                     bytes_transf = dados.get("bytes_transferred")
-
+                    Usuario.atualizar_estatisticas_upload(uploader,bytes_transf)
                     if uploader and isinstance(bytes_transf, int):
                         resposta["aprovado"] = True
                         resposta["texto"] = "Relatório de upload recebido. Obrigado!"
